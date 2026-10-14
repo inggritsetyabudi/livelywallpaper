@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Restores the wallpaper at login by starting the daemon.
+
+  Install:
+    mkdir -p ~/Library/LaunchAgents
+    cp scripts/com.lively.wallpaper.plist ~/Library/LaunchAgents/
+    launchctl load ~/Library/LaunchAgents/com.lively.wallpaper.plist
+
+  Remove:
+    launchctl unload ~/Library/LaunchAgents/com.lively.wallpaper.plist
+    rm ~/Library/LaunchAgents/com.lively.wallpaper.plist
+
+  ProgramArguments must point at the installed bundle. Update the path if you
+  keep the app somewhere other than /Applications.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.lively.wallpaper</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Applications/Lively.app/Contents/MacOS/Lively</string>
+        <string>daemon</string>
+    </array>
+
+    <!-- Start once at login. -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!--
+      Deliberately false. The daemon is idempotent -- it clears a stale
+      socket on start -- and KeepAlive would fight with `lively shutdown`,
+      restarting the process the moment a user tried to stop it.
+    -->
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <!-- Keep wallpaper logs out of the system log. -->
+    <key>StandardOutPath</key>
+    <string>/tmp/livelywallpaper.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/livelywallpaper.err</string>
+</dict>
+</plist>

@@ -114,8 +114,14 @@ The UI renders controls from this file, so a package gets a properties panel
 with no extra work. Properties are also settable from the CLI:
 
 ```console
-$ lively set-prop --screen 0 --name Intensity --value 80
+$ lively set-prop Intensity 80        # <NAME> <VALUE> are positional
+$ lively set-prop Intensity 80 -m 1   # for a specific screen
 ```
+
+Properties are only meaningful for renderers that consume them: web wallpapers
+receive them via `window.livelySetProperty`, shaders through their uniform
+buffer. On a renderer with no property channel the daemon reports that rather
+than silently succeeding.
 
 ## 1.4 Target resolution order
 
