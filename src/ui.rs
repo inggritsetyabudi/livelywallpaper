@@ -48,7 +48,14 @@ struct UiResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
     /// The fresh snapshot after the action ran.
-    state: StateSnapshot,
+    ///
+    /// Omitted for actions that do not touch app state -- notably
+    /// `playbackStatus`, which the window polls several times a second. Building
+    /// a snapshot re-reads the whole wallpaper library and the config from
+    /// disk, so returning one here would re-scan everything for a value the UI
+    /// throws away.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    state: Option<StateSnapshot>,
     /// Present only when the caller asked for playback details.
     #[serde(skip_serializing_if = "Option::is_none")]
     playback: Option<Option<PlaybackView>>,
@@ -256,27 +263,48 @@ fn handle_request(request_json: *const c_char) -> Result<String> {
     let mut response = UiResponse {
         ok: true,
         error: None,
-        state: build_snapshot(state, selected.as_deref())?,
+        state: None,
         playback: None,
     };
 
     // Run the action, then rebuild the snapshot so the UI renders the state
     // *after* the change. Returning a pre-action snapshot would make a
     // successful apply look like it did nothing.
+    let wants_snapshot = action_needs_snapshot(&request.action);
     let outcome = dispatch(&request, state);
     if let Ok(Some(playback)) = &outcome {
-        // Present only when the caller asked for it.
         response.playback = Some(Some(playback.clone()));
     }
-    response.state = build_snapshot(state, selected.as_deref())?;
 
-    if let Err(e) = outcome {
-        log::warn!("ui action `{}` failed: {e}", request.action);
+    let action_failed = match &outcome {
+        Ok(_) => None,
+        Err(e) => {
+            log::warn!("ui action `{}` failed: {e}", request.action);
+            Some(e.to_string())
+        }
+    };
+
+    // A failed action still returns state so the controls resync rather than
+    // showing stale values.
+    if wants_snapshot || action_failed.is_some() {
+        response.state = Some(build_snapshot(state, selected.as_deref())?);
+    }
+
+    if let Some(message) = action_failed {
         response.ok = false;
-        response.error = Some(e.to_string());
+        response.error = Some(message);
     }
 
     Ok(serde_json::to_string(&response)?)
+}
+
+/// Whether the caller needs a full snapshot back.
+///
+/// Anything that changes state, or reads the library or screens, does. A pure
+/// playback poll does not, and rebuilding the snapshot for it would re-read the
+/// whole library from disk several times a second.
+fn action_needs_snapshot(action: &str) -> bool {
+    !matches!(action, "playbackStatus")
 }
 
 fn dispatch(request: &UiRequest, state: &AppState) -> Result<Option<PlaybackView>> {

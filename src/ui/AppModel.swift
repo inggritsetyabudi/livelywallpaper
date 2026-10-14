@@ -123,6 +123,8 @@ struct StateSnapshot: Decodable {
 struct UiResponse: Decodable {
     let ok: Bool
     let error: String?
+    /// Absent for actions that do not change app state, so a playback poll does
+    /// not carry a whole library snapshot the caller would discard.
     let state: StateSnapshot?
     /// Present only for `playbackStatus`; null means "no video on that screen".
     let playback: PlaybackView??
@@ -257,7 +259,10 @@ final class AppModel: NSObject, ObservableObject {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
 
-        reload()
+reload()
+
+        // Only does anything when LIVELY_UI_SELFTEST=1.
+        UiSelfTest.runIfRequested(model: self)
     }
 
     // MARK: Derived
@@ -430,6 +435,12 @@ final class AppModel: NSObject, ObservableObject {
 
     func dismissError() {
         errorMessage = nil
+    }
+
+    /// Remove the wallpaper from a screen, used by the sidebar context menu.
+    func clearScreen(_ index: UInt32) {
+        guard send("closeWallpaper", ["monitor": Int(index)]) else { return }
+        statusMessage = "Removed the wallpaper from screen \(index + 1)."
     }
 }
 
