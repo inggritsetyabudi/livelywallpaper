@@ -157,6 +157,10 @@ extern "C" {
 
     /// True when the Swift half is linked in.
     pub fn lively_ui_available() -> bool;
+
+    /// Hands the command handler to Swift. Implemented in AppModel.swift; the
+    /// name deliberately differs from the Rust-side installer.
+    pub fn lively_ui_install_handler(raw: usize);
 }
 
 /// Function pointer Rust registers so Swift can send user intents back.

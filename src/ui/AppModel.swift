@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import os
 import SwiftUI
 
 // MARK: - C bridge
@@ -9,10 +10,27 @@ public typealias UiCommandHandler = @convention(c) (UnsafePointer<CChar>?) -> Un
 
 private var commandHandler: UiCommandHandler?
 
+/// Minimal logger: NSLog is visible in Console.app and in the unified log,
+/// which matters more here than pretty output.
+enum log {
+    static func info(_ message: String) {
+        NSLog("[LivelyUI] %@", message)
+    }
+}
+
 /// Stores the handler Rust handed us.
-@_cdecl("lively_ui_set_handler")
-public func lively_ui_set_handler(_ handler: UiCommandHandler?) {
-    commandHandler = handler
+///
+/// Named differently from the Rust-side `lively_ui_set_handler` on purpose: two
+/// symbols with the same name meant Rust called its own copy, the Swift side
+/// stayed nil, and every UI action failed with "not connected to the daemon".
+/// Rust is the only caller.
+@_cdecl("lively_ui_install_handler")
+public func lively_ui_install_handler(_ raw: UInt) {
+    guard raw != 0 else {
+        commandHandler = nil
+        return
+    }
+    commandHandler = unsafeBitCast(raw, to: UiCommandHandler.self)
 }
 
 /// Releases a string returned by the Rust handler.
@@ -343,7 +361,13 @@ final class AppModel: NSObject, ObservableObject {
     }
 
     func reload() {
-        _ = send("state", ["id": selectedId ?? NSNull()])
+        guard send("state", ["id": selectedId ?? NSNull()]) else {
+            // Logged rather than only shown in the alert: if the window opens
+            // blank this is the one line that says why.
+            NSLog("[LivelyUI] could not load state: %@", errorMessage ?? "unknown")
+            return
+        }
+        log.info("library: \(library.count) items (\(builtins.count) built-in)")
     }
 
     func select(_ entry: LibraryEntry) {

@@ -166,15 +166,29 @@ pub fn available() -> bool {
 // FFI entry points
 // ---------------------------------------------------------------------------
 
+/// Installs the UI command handler.
+///
+/// Records it for this process *and* hands it to the Swift half. Doing only the
+/// first leaves `commandHandler` nil on the Swift side, and the window then
+/// reports "the settings UI is not connected to the daemon" for every action.
+///
 /// # Safety
 ///
-/// Called by Swift at startup on the main thread with a valid function pointer.
+/// Must be called on the main thread, before any UI action can arrive, with a
+/// valid function pointer.
 #[no_mangle]
 pub unsafe extern "C" fn lively_ui_set_handler(handler: ffi::LivelyUiCommandHandler) {
+    use std::sync::atomic::Ordering;
+
     // The handler is a plain `extern "C" fn` with no captures, so storing it in
     // a static is sound: it has no lifetime and no thread affinity beyond the
     // main thread, which is where every caller already is.
-    HANDLER.store(handler as usize, std::sync::atomic::Ordering::Release);
+    HANDLER.store(handler as usize, Ordering::Release);
+
+    // Swift stores the handler itself, so it must be told. The pointer crosses
+    // as an integer because Swift cannot hold a Rust function pointer in a
+    // typed property without a bit cast.
+    ffi::lively_ui_install_handler(handler as usize);
 }
 
 /// # Safety

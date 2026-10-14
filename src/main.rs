@@ -278,6 +278,14 @@ fn run(cli: Cli) -> Result<()> {
         return dispatch_to_daemon(command);
     }
 
+    // No daemon. For commands whose whole purpose is to change what is running,
+    // starting one is what the user meant -- refusing just makes them learn an
+    // incantation first. `shutdown` is excluded on principle: starting a daemon
+    // in order to immediately stop it is absurd.
+    if wants_running_daemon(&command) && auto_start_daemon()? {
+        return dispatch_to_daemon(command);
+    }
+
     // Only these commands may start a daemon. Everything else must fail loudly:
     // silently backgrounding a process the user did not ask for is surprising,
     // and for `shutdown` it would block forever waiting for work that never
@@ -297,6 +305,63 @@ fn run(cli: Cli) -> Result<()> {
     Err(Error::Ipc(
         "no daemon is running. Start one with `lively daemon`.".into(),
     ))
+}
+
+/// Whether this command only makes sense while the daemon is running.
+fn wants_running_daemon(command: &Commands) -> bool {
+    matches!(
+        command,
+        Commands::Set { .. }
+            | Commands::Close { .. }
+            | Commands::Play { .. }
+            | Commands::Pause
+            | Commands::Volume { .. }
+            | Commands::Seek { .. }
+            | Commands::SetProp { .. }
+            | Commands::Screenshot { .. }
+    )
+}
+
+/// Start a detached daemon and wait for it to answer.
+///
+/// Spawning the same executable with `daemon` keeps one binary authoritative
+/// about how the daemon starts. `LIVELY_NO_AUTOSTART=1` opts out, which is what
+/// scripts that manage the process themselves need.
+fn auto_start_daemon() -> Result<bool> {
+    if std::env::var_os("LIVELY_NO_AUTOSTART").is_some() {
+        return Ok(false);
+    }
+
+    let Ok(exe) = std::env::current_exe() else {
+        return Ok(false);
+    };
+
+    info!("no daemon running; starting one");
+
+    let spawned = std::process::Command::new(exe)
+        .arg("daemon")
+        // Detach: the daemon outlives this CLI invocation.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
+    if spawned.is_err() {
+        return Ok(false);
+    }
+
+    // Poll for readiness rather than sleeping a fixed amount: a slow disk
+    // makes the daemon start slower, and a fixed sleep would be either too
+    // long on a fast machine or too short on a slow one.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if ipc::is_daemon_running() {
+            return Ok(true);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    Ok(false)
 }
 
 /// Check everything that can be checked without touching the daemon.

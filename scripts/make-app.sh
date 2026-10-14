@@ -93,14 +93,23 @@ echo "==> Built $APP"
 
 if [ "${1:-}" = "--run" ]; then
   echo "==> Launching"
+  # Stop any previous copy first. Launching a second daemon would fail to bind
+  # the socket *after* it had already created desktop windows, leaving a dead
+  # process and a confusing "no daemon" error for the commands that follow.
   pkill -f "$APP/Contents/MacOS/$APP_NAME" 2>/dev/null || true
   sleep 1
+
+  # Launched through `open` so macOS treats it as a real app: the binary sees a
+  # bundle path, starts the daemon and opens the settings window by itself.
   open "$APP"
-  sleep 3
-  # Ask the running daemon to show its window, which is what the menu bar's
-  # "Open Lively…" item does.
-  "$APP/Contents/MacOS/$APP_NAME" daemon >/tmp/lively-daemon.log 2>&1 &
-  sleep 3
-  "$APP/Contents/MacOS/$APP_NAME" show-app || true
-  echo "==> Running. Logs: /tmp/lively-daemon.log"
+  sleep 4
+
+  if "$APP/Contents/MacOS/$APP_NAME" list-library >/dev/null 2>&1; then
+    echo "==> Running. Library:"
+    "$APP/Contents/MacOS/$APP_NAME" list-library | sed 's/^/    /'
+  else
+    echo "==> WARNING: the daemon is not answering after launch" >&2
+    exit 1
+  fi
+  echo "==> Logs: log stream --predicate 'process == \"Lively\"'"
 fi
