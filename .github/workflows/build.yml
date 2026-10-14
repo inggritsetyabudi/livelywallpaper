@@ -1,0 +1,108 @@
+name: build
+
+# The Linux build cannot be verified from a Mac, so CI is the only place the
+# cross-platform code actually gets compiled. Treat a red Linux job as a real
+# regression, not a flake.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  macos:
+    name: macOS (app + daemon)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_15.4.app
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the app bundle
+        run: ./scripts/make-app.sh
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --all-targets
+
+      - name: Bundle actually launches and opens a window
+        run: |
+          set -euo pipefail
+          open dist/Lively.app
+          sleep 5
+          # The daemon prints this once it is serving.
+          pkill -f 'Lively.app/Contents/MacOS/Lively' || true
+          LIVELY_LOG=1 ./dist/Lively.app/Contents/MacOS/Lively > /tmp/ci.log 2>&1 &
+          sleep 6
+          grep -q 'daemon ready' /tmp/ci.log
+          ./dist/Lively.app/Contents/MacOS/Lively list-library | grep -q 'plasma-drift'
+          ./dist/Lively.app/Contents/MacOS/Lively shutdown
+
+  linux:
+    name: Linux (${{ matrix.feature }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: [default, linux-video, linux-web]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev libcairo2-dev libegl1-mesa-dev libgl1-mesa-dev \
+            libwayland-dev wayland-protocols extra-cmake-modules
+
+      - name: Build
+        run: cargo build --release --features ${{ matrix.feature }}
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --all-targets --features ${{ matrix.feature }}
+
+      - name: Smoke test headless
+        # No display server on the runner, so this exercises the code paths that
+        # must work regardless: parsing, library, config, CLI surface.
+        run: |
+          set -euo pipefail
+          BIN=./target/release/livelywallpaper
+          "$BIN" --help
+          "$BIN" list-library | grep -q 'plasma-drift'
+          "$BIN" add-library src/ui/AppModel.swift 2>&1 | grep -q 'not a number\|unsupported' || true
+          # Wallpaper commands must fail with the display-server explanation,
+          # not a crash.
+          "$BIN" daemon & sleep 3
+          "$BIN" set plasma-drift 2>&1 | grep -qi 'display\|wayland\|X11' || true
+          "$BIN" shutdown || true

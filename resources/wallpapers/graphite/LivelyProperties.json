@@ -1,0 +1,21 @@
+{
+  "Contrast": {
+    "type": "slider",
+    "text": "Contrast",
+    "value": 35,
+    "min": 0,
+    "max": 100,
+    "step": 1
+  },
+  "Tint": {
+    "type": "dropdown",
+    "text": "Tint",
+    "value": "neutral",
+    "options": ["neutral", "cool", "warm"]
+  },
+  "Vignette": {
+    "type": "checkbox",
+    "text": "Vignette",
+    "value": true
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "Brightness": {
+    "type": "slider",
+    "text": "Brightness",
+    "value": 0,
+    "min": -30,
+    "max": 30,
+    "step": 1
+  },
+  "Highlight": {
+    "type": "dropdown",
+    "text": "Highlight",
+    "value": "violet",
+    "options": ["violet", "blue", "teal"]
+  },
+  "Matte": {
+    "type": "checkbox",
+    "text": "Matte finish",
+    "value": true
+  }
+}

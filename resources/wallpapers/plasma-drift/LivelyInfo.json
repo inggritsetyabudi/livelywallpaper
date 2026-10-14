@@ -1,0 +1,11 @@
+{
+  "AppVersion": "2.0.0.0",
+  "Title": "Plasma Drift",
+  "Desc": "GPU-rendered domain-warped noise. Runs entirely on the Metal shader engine at 60fps.",
+  "Author": "Lively",
+  "License": "MIT",
+  "Type": 6,
+  "FileName": "shader.metal",
+  "Thumbnail": "thumb.png",
+  "Preview": "thumb.png"
+}

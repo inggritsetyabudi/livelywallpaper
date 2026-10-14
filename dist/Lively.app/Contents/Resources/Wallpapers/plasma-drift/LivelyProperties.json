@@ -1,0 +1,31 @@
+{
+  "Intensity": {
+    "type": "slider",
+    "text": "Intensity",
+    "value": 50,
+    "min": 0,
+    "max": 100,
+    "step": 1
+  },
+  "Warmth": {
+    "type": "slider",
+    "text": "Warmth",
+    "value": 20,
+    "min": 0,
+    "max": 100,
+    "step": 1
+  },
+  "Scale": {
+    "type": "slider",
+    "text": "Scale",
+    "value": 2.0,
+    "min": 0.5,
+    "max": 6.0,
+    "step": 0.5
+  },
+  "Vignette": {
+    "type": "checkbox",
+    "text": "Vignette",
+    "value": true
+  }
+}

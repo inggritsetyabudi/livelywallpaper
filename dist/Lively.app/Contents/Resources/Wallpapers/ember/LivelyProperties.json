@@ -1,0 +1,20 @@
+{
+  "Warmth": {
+    "type": "slider",
+    "text": "Warmth",
+    "value": 50,
+    "min": 0,
+    "max": 100,
+    "step": 1
+  },
+  "Accent": {
+    "type": "color",
+    "text": "Accent",
+    "value": "#ff7a29"
+  },
+  "Deep": {
+    "type": "checkbox",
+    "text": "Deep shadows",
+    "value": true
+  }
+}
