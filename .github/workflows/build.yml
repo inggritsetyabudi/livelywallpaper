@@ -78,7 +78,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libxcb1-dev libcairo2-dev libegl1-mesa-dev libgl1-mesa-dev \
-            libwayland-dev wayland-protocols extra-cmake-modules
+            libwayland-dev wayland-protocols \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            libwebkit2gtk-4.1-dev
 
       - name: Build
         run: cargo build --release --features ${{ matrix.feature }}
@@ -105,4 +107,13 @@ jobs:
           # not a crash.
           "$BIN" daemon & sleep 3
           "$BIN" set plasma-drift 2>&1 | grep -qi 'display\|wayland\|X11' || true
+
+      - name: Syntax-check the C shim without linking
+        # Nothing else in the job exercises lively_linux.c at runtime, so at
+        # least prove it compiles.
+        run: |
+          gcc -fsyntax-only -Wall -Wextra \
+            -DLIVELY_HAVE_VIDEO -DLIVELY_HAVE_WEB \
+            $(pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 gtk+-3.0 webkit2gtk-4.1 xcb cairo) \
+            src/platform/native/lively_linux.c
           "$BIN" shutdown || true

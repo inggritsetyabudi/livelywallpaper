@@ -81,6 +81,17 @@ fn build_linux() {
         println!("cargo:rustc-link-lib={lib}");
     }
 
+    if has("LINUX_VIDEO") {
+        for lib in ["gstreamer-1.0", "gstreamer-app-1.0", "gstreamer-video-1.0"] {
+            println!("cargo:rustc-link-lib={lib}");
+        }
+    }
+
+    if has("LINUX_WEB") {
+        println!("cargo:rustc-link-lib=webkit2gtk-4.1");
+        println!("cargo:rustc-link-lib=javascriptcoregtk-4.1");
+    }
+
     // Wayland layer-shell, only meaningful on a Wayland session.
     if has("LINUX_WAYLAND") {
         println!("cargo:rustc-link-lib=wayland-client");

@@ -16,7 +16,14 @@ extern "C" {
     fn lively_create_view(handle: *mut c_void, path: *const c_char, kind: c_int) -> c_int;
     fn lively_swap_view_source(handle: *mut c_void, path: *const c_char) -> c_int;
     fn lively_destroy_view(handle: *mut c_void);
+    fn lively_web_set_paused(handle: *mut c_void, paused: c_int) -> c_int;
+    fn lively_web_send_property(
+        handle: *mut c_void,
+        name: *const c_char,
+        value: *const c_char,
+    ) -> c_int;
     fn lively_set_playing(handle: *mut c_void, playing: c_int);
+    fn lively_refresh_video(handle: *mut c_void);
     fn lively_set_volume(handle: *mut c_void, volume: f64);
     fn lively_seek(handle: *mut c_void, percent: f64);
     fn lively_playback_state(handle: *mut c_void) -> c_int;
@@ -94,12 +101,31 @@ pub fn swap_image_source(handle: *mut c_void, path: &std::path::Path) -> bool {
     unsafe { lively_swap_view_source(handle, path.as_ptr()) == 1 }
 }
 
-pub fn create_video_view(_handle: *mut c_void, _path: &std::path::Path) -> bool {
-    false
+pub fn create_video_view(handle: *mut c_void, path: &std::path::Path) -> bool {
+    // The C side only reports success when GStreamer is actually compiled in
+    // and the pipeline reached PLAYING.
+    let Some(path) = cstring(path) else {
+        return false;
+    };
+    unsafe { lively_create_view(handle, path.as_ptr(), kind_code(SurfaceKind::Video)) == 1 }
 }
 
-pub fn create_web_view(_handle: *mut c_void, _path: &std::path::Path) -> bool {
-    false
+pub fn create_web_view(handle: *mut c_void, path: &std::path::Path) -> bool {
+    let Some(path) = cstring(path) else {
+        return false;
+    };
+    unsafe { lively_create_view(handle, path.as_ptr(), kind_code(SurfaceKind::Web)) == 1 }
+}
+
+pub fn web_set_paused(handle: *mut c_void, paused: bool) -> bool {
+    unsafe { lively_web_set_paused(handle, c_int::from(paused)) == 1 }
+}
+
+pub fn web_send_property(handle: *mut c_void, name: &str, value: &str) -> bool {
+    let (Ok(n), Ok(v)) = (std::ffi::CString::new(name), std::ffi::CString::new(value)) else {
+        return false;
+    };
+    unsafe { lively_web_send_property(handle, n.as_ptr(), v.as_ptr()) == 1 }
 }
 
 pub fn create_shader_view(_handle: *mut c_void, _path: &std::path::Path) -> bool {
@@ -123,7 +149,10 @@ pub fn seek_video(handle: *mut c_void, percent: f64) {
 }
 
 pub fn video_playback(handle: *mut c_void) -> Playback {
+    // Position and duration are queried from the live pipeline rather than
+    // cached, so the UI cannot report a stale value.
     unsafe {
+        lively_refresh_video(handle);
         Playback {
             state: PlaybackState::from_code(lively_playback_state(handle)),
             position: lively_playback_position(handle),

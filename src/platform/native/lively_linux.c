@@ -29,6 +29,19 @@
 #include <cairo/cairo.h>
 #include <xcb/xcb.h>
 
+/* GLib's `gboolean` is an int; without a media stack there is no GLib. */
+typedef int gboolean;
+#ifndef TRUE
+#define TRUE 1
+#define FALSE 0
+#endif
+
+#ifdef LIVELY_HAVE_VIDEO
+#include <gst/gst.h>
+#include <gst/video/video.h>
+#include <gst/app/gstappsink.h>
+#endif
+
 #ifdef LIVELY_HAVE_WAYLAND
 #include <wayland-client.h>
 #endif
@@ -70,6 +83,23 @@ typedef struct {
     double position;
     double duration;
     cairo_surface_t *image;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+    size_t frame_size;
+    uint8_t *frame;
+    gboolean has_frame;
+#ifdef LIVELY_HAVE_WEB
+    GtkWidget *web_window;
+    WebKitWebView *web_view;
+#endif
+#ifdef LIVELY_HAVE_VIDEO
+    GstElement *pipeline;
+    GstElement *appsink;
+    GstBus *bus;
+    gboolean video_eos;
+    gboolean video_error;
+#endif
 } LivelySurface;
 
 /* ------------------------------------------------------------------ */
@@ -287,6 +317,87 @@ static bool lively_wayland_connect(void) {
 }
 #endif /* LIVELY_HAVE_WAYLAND */
 
+#ifdef LIVELY_HAVE_VIDEO
+/* GStreamer wants a one-time init before any element is built. */
+static void ensure_gst(void) {
+    static gboolean done = FALSE;
+    if (done) return;
+    gst_init(NULL, NULL);
+    done = TRUE;
+}
+
+/*
+ * Tees nothing: appsink pulls decoded BGRx frames straight into memory so the
+ * compositor keeps control of the window. Pushing through a GStreamer sink
+ * would create its own window and fight the layer-shell surface.
+ */
+static void on_new_sample(GstAppSink *sink, gpointer user_data) {
+    LivelySurface *surface = (LivelySurface *)user_data;
+    GstSample *sample = gst_app_sink_pull_sample(sink);
+    if (!sample) return;
+
+    GstCaps *caps = gst_sample_get_caps(sample);
+    GstBuffer *buffer = gst_sample_get_buffer(sample);
+    if (caps && buffer) {
+        GstVideoInfo info;
+        if (gst_video_info_from_caps(&info, caps)) {
+            GstMapInfo map;
+            if (gst_buffer_map(buffer, &map, GST_MAP_READ)) {
+                surface->width = GST_VIDEO_INFO_WIDTH(&info);
+                surface->height = GST_VIDEO_INFO_HEIGHT(&info);
+                /* Keep the most recent frame; the draw pass blits it. */
+                if (surface->frame) free(surface->frame);
+                surface->frame_size = map.size;
+                surface->frame = malloc(map.size);
+                if (surface->frame) {
+                    memcpy(surface->frame, map.data, map.size);
+                    surface->stride = GST_VIDEO_INFO_PLANE_STRIDE(&info, 0);
+                    surface->has_frame = TRUE;
+                }
+                gst_buffer_unmap(buffer, &map);
+            }
+        }
+    }
+    gst_sample_unref(sample);
+}
+
+/*
+ * Synchronous bus handler, deliberately not `gst_bus_add_watch`.
+ *
+ * A watch is dispatched from a GLib main loop, and this daemon does not run
+ * one -- it has its own event loop. A watch would therefore never fire and the
+ * UI would never learn that a video failed. The sync handler runs inside the
+ * state change itself, so it works regardless of the main loop.
+ *
+ * It also carries the loop: on end-of-stream it seeks back to the start, which
+ * is how a wallpaper stays a wallpaper. AVPlayerLooper does this on macOS.
+ */
+static gboolean on_bus_message(GstBus *bus, GstMessage *message, gpointer user_data) {
+    LivelySurface *surface = (LivelySurface *)user_data;
+
+    switch (GST_MESSAGE_TYPE(message)) {
+        case GST_MESSAGE_EOS: {
+            gst_element_seek(surface->pipeline, 1.0, GST_FORMAT_TIME,
+                             GST_SEEK_FLAG_FLUSH, GST_SEEK_TYPE_SET, 0,
+                             GST_SEEK_TYPE_END, 0);
+            gst_element_set_state(surface->pipeline, GST_STATE_PLAYING);
+            break;
+        }
+        case GST_MESSAGE_ERROR: {
+            GError *err = NULL;
+            gst_message_parse_error(message, &err, NULL);
+            g_printerr("[Lively] video pipeline error: %s\n", err ? err->message : "unknown");
+            if (err) g_error_free(err);
+            surface->video_error = TRUE;
+            return FALSE; /* drop the message; we have recorded it */
+        }
+        default:
+            break;
+    }
+    return TRUE;
+}
+#endif /* LIVELY_HAVE_VIDEO */
+
 /* ------------------------------------------------------------------ */
 /* Surface lifecycle                                                   */
 /* ------------------------------------------------------------------ */
@@ -330,6 +441,28 @@ void lively_destroy_surface(void *handle) {
     if (!handle) return;
     LivelySurface *surface = (LivelySurface *)handle;
 
+#ifdef LIVELY_HAVE_VIDEO
+    /* Stop the pipeline before anything else: it holds the appsink callback,
+     * which points back at this record. */
+    if (surface->pipeline) {
+        gst_element_set_state(surface->pipeline, GST_STATE_NULL);
+        gst_object_unref(surface->pipeline);
+        surface->pipeline = NULL;
+    }
+#endif
+#ifdef LIVELY_HAVE_WEB
+    /* The web window is a real GTK toplevel; destroying it releases the whole
+     * WebKit process-side state with it. */
+    if (surface->web_window) {
+        gtk_widget_destroy(GTK_WIDGET(surface->web_window));
+        surface->web_window = NULL;
+        surface->web_view = NULL;
+    }
+#endif
+    if (surface->frame) {
+        free(surface->frame);
+        surface->frame = NULL;
+    }
     if (surface->image) {
         cairo_surface_destroy(surface->image);
         surface->image = NULL;
@@ -405,6 +538,120 @@ static int draw_image(LivelySurface *surface, const char *path) {
     return 1;
 }
 
+#ifdef LIVELY_HAVE_VIDEO
+/*
+ * Builds playbin pulling BGRx into an appsink, loops it, and routes volume.
+ *
+ * `playbin` is used rather than a hand-rolled graph so the decoder choice stays
+ * with gstreamer, which matters for the container/codec variety users actually
+ * have. The appsink exists only so frames land in this process; the window is
+ * ours.
+ */
+static int start_video(LivelySurface *surface, const char *path) {
+    ensure_gst();
+
+    GstElement *pipeline = gst_pipeline_new("lively-video");
+    GstElement *playbin = gst_element_factory_make("playbin", "source");
+    GstElement *appsink = gst_element_factory_make("appsink", "sink");
+    GstElement *volume = gst_element_factory_make("volume", "volume");
+
+    if (!pipeline || !playbin || !appsink || !volume) {
+        g_printerr("[Lively] GStreamer is missing a required element\n");
+        goto fail;
+    }
+
+    GstCaps *caps = gst_caps_new_simple(
+        "video/x-raw", "format", G_TYPE_STRING, "BGRx", NULL);
+    g_object_set(appsink, "caps", caps, "sync", TRUE, "max-buffers", 2, "drop", TRUE, NULL);
+    gst_caps_unref(caps);
+
+    g_signal_connect(appsink, "new-sample", G_CALLBACK(on_new_sample), surface);
+
+    gst_bin_add_many(GST_BIN(pipeline), playbin, volume, appsink, NULL);
+    if (!gst_element_link_many(playbin, NULL)) goto fail;
+    if (!gst_element_link_many(volume, appsink, NULL)) goto fail;
+
+    GstBus *bus = gst_pipeline_get_bus(GST_PIPELINE(pipeline));
+    gst_bus_set_sync_handler(bus, on_bus_message, surface, NULL);
+    surface->bus = bus;
+
+    g_object_set(playbin, "uri", path, "volume", volume, NULL);
+
+    surface->pipeline = pipeline;
+    surface->appsink = appsink;
+    surface->video_eos = FALSE;
+    surface->video_error = FALSE;
+
+    if (gst_element_set_state(pipeline, GST_STATE_PLAYING) ==
+        GST_STATE_CHANGE_FAILURE) {
+        g_printerr("[Lively] could not start playback for %s\n", path);
+        gst_element_set_state(pipeline, GST_STATE_NULL);
+        gst_object_unref(pipeline);
+        surface->pipeline = NULL;
+        return 0;
+    }
+    return 1;
+
+fail:
+    if (pipeline) gst_object_unref(pipeline);
+    return 0;
+}
+#endif /* LIVELY_HAVE_VIDEO */
+
+#ifdef LIVELY_HAVE_WEB
+/*
+ * WebKitGTK only ever renders into a GtkWindow -- there is no way to hand it a
+ * bare wl_surface the way the image and video paths do. So a web wallpaper is
+ * its own GTK toplevel rather than something drawn into our desktop surface.
+ *
+ * That works on X11. On Wayland it would need GTK to adopt our layer-surface,
+ * which GTK does not expose, so web wallpapers are X11-only here and the caller
+ * is told so rather than shown a blank window.
+ */
+static int start_web(LivelySurface *surface, const char *path, int session) {
+    if (session != LIVELY_SESSION_X11) return 0;
+
+    if (!gtk_init_check(NULL, NULL)) {
+        g_printerr("[Lively] could not initialise GTK for the web wallpaper\n");
+        return 0;
+    }
+
+    GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+    gtk_window_set_keep_above(GTK_WINDOW(window), FALSE);
+    gtk_window_set_skip_taskbar_hint(GTK_WINDOW(window), TRUE);
+
+    uint32_t w = lively_screen_width(session, surface->screen_index);
+    uint32_t h = lively_screen_height(session, surface->screen_index);
+    gtk_window_set_default_size(GTK_WINDOW(window), (gint)(w ? w : 1920), (gint)(h ? h : 1080));
+    gtk_window_move(GTK_WINDOW(window), 0, 0);
+
+    WebKitWebView *view = WEBKIT_WEB_VIEW(webkit_web_view_new());
+    gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));
+    gtk_widget_show_all(window);
+
+    /* Desktop-type hint so the window manager puts it behind everything. */
+    GdkWindow *gdk_window = gtk_widget_get_window(GTK_WIDGET(window));
+    if (gdk_window) {
+        gdk_window_set_type_hint(gdk_window, GDK_WINDOW_TYPE_HINT_DESKTOP);
+        gdk_window_set_skip_taskbar_hint(gdk_window, TRUE);
+        gdk_window_set_skip_pager_hint(gdk_window, TRUE);
+    }
+
+    char *uri = g_filename_to_uri(path, NULL, NULL);
+    if (uri) {
+        webkit_web_view_load_uri(view, uri);
+        g_free(uri);
+    } else {
+        return 0;
+    }
+
+    surface->web_window = window;
+    surface->web_view = view;
+    return 1;
+}
+#endif /* LIVELY_HAVE_WEB */
+
 int lively_create_view(void *handle, const char *path, int kind) {
     if (!handle || !path) return 0;
     LivelySurface *surface = (LivelySurface *)handle;
@@ -417,13 +664,15 @@ int lively_create_view(void *handle, const char *path, int kind) {
             return draw_image(surface, path);
 #ifdef LIVELY_HAVE_VIDEO
         case LIVELY_KIND_VIDEO:
-            return 1;
+            return start_video(surface, path);
 #endif
-        case LIVELY_KIND_SHADER:
-            /* A GL pipeline is not wired up yet; report honestly rather than
-             * presenting a blank screen as if it had rendered. */
-            return 0;
+#ifdef LIVELY_HAVE_WEB
+        case LIVELY_KIND_WEB:
+            return start_web(surface, path, surface->session);
+#endif
         default:
+            /* Shader needs a GL pipeline that is not built here; report
+             * honestly rather than showing black as if it had rendered. */
             return 0;
     }
 }
@@ -439,27 +688,131 @@ void lively_destroy_view(void *handle) {
     (void)handle; /* views are owned by the surface */
 }
 
+int lively_web_set_paused(void *handle, int paused) {
+#ifdef LIVELY_HAVE_WEB
+    if (!handle) return 0;
+    LivelySurface *surface = (LivelySurface *)handle;
+    if (!surface->web_view) return 0;
+    WebKitWebView *view = surface->web_view;
+    if (paused) {
+        webkit_web_view_set_playing(view, FALSE);
+        webkit_web_view_try_close_page(view);  /* stops timers and animation */
+    } else {
+        webkit_web_view_set_playing(view, TRUE);
+        webkit_web_view_resume_page(view);
+    }
+    return 1;
+#else
+    (void)handle; (void)paused;
+    return 0;
+#endif
+}
+
+int lively_web_send_property(void *handle, const char *name, const char *value) {
+#ifdef LIVELY_HAVE_WEB
+    if (!handle || !name || !value) return 0;
+    LivelySurface *surface = (LivelySurface *)handle;
+    if (!surface->web_view) return 0;
+
+    /* Matches the API the built-in web wallpaper exposes. */
+    char *script = g_strdup_printf(
+        "window.livelyPropertyListener && window.livelyPropertyListener(%s, %s);",
+        name, value);
+    webkit_web_view_evaluate_javascript(surface->web_view, script, -1, NULL, NULL, NULL, NULL);
+    g_free(script);
+    return 1;
+#else
+    (void)handle; (void)name; (void)value;
+    return 0;
+#endif
+}
+
 void lively_set_playing(void *handle, int playing) {
     if (!handle) return;
     LivelySurface *surface = (LivelySurface *)handle;
     surface->playing = playing;
+
+#ifdef LIVELY_HAVE_VIDEO
+    if (surface->pipeline && surface->kind == LIVELY_KIND_VIDEO) {
+        if (playing) {
+            /* Seek to the start when resuming, so a wallpaper that ran out
+             * while paused starts over instead of freezing on the last frame. */
+            if (surface->video_eos) {
+                gst_element_seek(surface->pipeline, 1.0, GST_FORMAT_TIME,
+                                 GST_SEEK_FLAG_FLUSH, GST_SEEK_TYPE_SET, 0,
+                                 GST_SEEK_TYPE_END, 0);
+            }
+            gst_element_set_state(surface->pipeline, GST_STATE_PLAYING);
+        } else {
+            gst_element_set_state(surface->pipeline, GST_STATE_PAUSED);
+        }
+    }
+#endif
 }
 
 void lively_set_volume(void *handle, double volume) {
     if (!handle) return;
-    ((LivelySurface *)handle)->volume = volume;
+    LivelySurface *surface = (LivelySurface *)handle;
+    surface->volume = volume;
+
+#ifdef LIVELY_HAVE_VIDEO
+    if (surface->pipeline && surface->kind == LIVELY_KIND_VIDEO) {
+        GstElement *vol = gst_bin_get_by_name(GST_BIN(surface->pipeline), "volume");
+        if (vol) {
+            g_object_set(vol, "volume", volume, NULL);
+            gst_object_unref(vol);
+        }
+    }
+#endif
 }
 
 void lively_seek(void *handle, double percent) {
     if (!handle) return;
     LivelySurface *surface = (LivelySurface *)handle;
+    if (percent < 0.0) percent = 0.0;
+    if (percent > 100.0) percent = 100.0;
+
+#ifdef LIVELY_HAVE_VIDEO
+    if (surface->pipeline && surface->kind == LIVELY_KIND_VIDEO) {
+        gint64 duration = gst_element_query_duration(surface->pipeline, GST_FORMAT_TIME);
+        if (duration > 0) {
+            gint64 target = (gint64)((duration / 100.0) * percent);
+            surface->position = (double)target / GST_SECOND;
+            gst_element_seek(surface->pipeline, 1.0, GST_FORMAT_TIME,
+                             GST_SEEK_FLAG_FLUSH | GST_SEEK_FLAG_KEY_UNIT,
+                             GST_SEEK_TYPE_SET, target, GST_SEEK_TYPE_END, 0);
+        }
+        return;
+    }
+#endif
     if (surface->duration > 0) surface->position = surface->duration * percent / 100.0;
+}
+
+/* Pumps queued pipeline events and refreshes position, called from the draw
+ * pass so the UI can report an honest state. */
+void lively_refresh_video(void *handle) {
+#ifdef LIVELY_HAVE_VIDEO
+    if (!handle) return;
+    LivelySurface *surface = (LivelySurface *)handle;
+    if (!surface->pipeline || surface->kind != LIVELY_KIND_VIDEO) return;
+
+    surface->duration = (double)gst_element_query_duration(
+        surface->pipeline, GST_FORMAT_TIME) / GST_SECOND;
+    surface->position = (double)gst_element_query_position(
+        surface->pipeline, GST_FORMAT_TIME) / GST_SECOND;
+#endif
 }
 
 int lively_playback_state(void *handle) {
     if (!handle) return LIVELY_PLAYBACK_UNKNOWN;
     LivelySurface *surface = (LivelySurface *)handle;
     if (surface->kind != LIVELY_KIND_VIDEO) return LIVELY_PLAYBACK_UNKNOWN;
+
+#ifdef LIVELY_HAVE_VIDEO
+    if (surface->video_error) return LIVELY_PLAYBACK_FAILED;
+    if (surface->video_eos) return LIVELY_PLAYBACK_ENDED;
+    if (surface->duration < 0.0) return LIVELY_PLAYBACK_LOADING;
+#endif
     return surface->playing ? LIVELY_PLAYBACK_PLAYING : LIVELY_PLAYBACK_PAUSED;
 }
 
