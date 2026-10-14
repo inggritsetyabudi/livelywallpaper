@@ -5,3 +5,8 @@
 # Local scratch
 *.log
 .DS_Store
+__pycache__/
+*.pyc
+
+# Build output. Reproduce with ./scripts/make-app.sh -- do not commit.
+dist/
