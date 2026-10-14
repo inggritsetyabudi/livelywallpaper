@@ -88,8 +88,14 @@ impl Platform for MacPlatform {
                     ),
                     "video view",
                 )?,
-                SurfaceKind::Web => check(
+                // `is_local_file` selects the WebKit loader. Passing `true`
+                // for a remote URL makes WebKit raise "is not a file URL".
+                SurfaceKind::WebFile => check(
                     ffi::lively_create_web_view(surface, location.as_ptr(), true),
+                    "web view",
+                )?,
+                SurfaceKind::WebUrl => check(
+                    ffi::lively_create_web_view(surface, location.as_ptr(), false),
                     "web view",
                 )?,
                 SurfaceKind::Shader => {
@@ -138,7 +144,9 @@ impl Platform for MacPlatform {
         unsafe {
             match view.kind {
                 SurfaceKind::Video => ffi::lively_destroy_video_view(view.ptr),
-                SurfaceKind::Web => ffi::lively_destroy_web_view(view.ptr),
+                SurfaceKind::WebFile | SurfaceKind::WebUrl => {
+                    ffi::lively_destroy_web_view(view.ptr)
+                }
                 SurfaceKind::Shader => ffi::lively_destroy_shader_view(view.ptr),
                 SurfaceKind::Image => ffi::lively_destroy_image_view(view.ptr),
             }
@@ -156,7 +164,7 @@ impl Platform for MacPlatform {
                         ffi::lively_video_pause(view.ptr)
                     }
                 }
-                SurfaceKind::Web => {
+                SurfaceKind::WebFile | SurfaceKind::WebUrl => {
                     if playing {
                         ffi::lively_web_resume(view.ptr)
                     } else {

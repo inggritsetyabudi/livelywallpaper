@@ -336,7 +336,7 @@ impl EngineManager {
                 ActivePlatform::seek(view, percent.clamp(0.0, 100.0));
                 Ok(())
             }
-            SurfaceKind::Web => {
+            SurfaceKind::WebFile | SurfaceKind::WebUrl => {
                 // For web wallpapers `0` doubles as "start over".
                 if percent <= 0.0 {
                     ActivePlatform::reload_web(view);
@@ -366,7 +366,7 @@ impl EngineManager {
     pub fn set_property(&self, screen_index: u32, name: &str, value: &str) -> Result<()> {
         let index = self.find_screen_index(screen_index)?;
         match self.screens[index].active_view.as_ref() {
-            Some(view) if view.kind == SurfaceKind::Web => {
+            Some(view) if matches!(view.kind, SurfaceKind::WebFile | SurfaceKind::WebUrl) => {
                 ActivePlatform::send_property(view, name, value)
             }
             _ => Err(Error::Invalid(
@@ -458,7 +458,8 @@ impl EngineManager {
 pub fn surface_kind(renderer: Renderer) -> Result<SurfaceKind> {
     Ok(match renderer {
         Renderer::Video => SurfaceKind::Video,
-        Renderer::WebFile | Renderer::WebUrl => SurfaceKind::Web,
+        Renderer::WebFile => SurfaceKind::WebFile,
+        Renderer::WebUrl => SurfaceKind::WebUrl,
         Renderer::Shader => SurfaceKind::Shader,
         Renderer::Image => SurfaceKind::Image,
     })

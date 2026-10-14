@@ -45,7 +45,7 @@ pub fn session_code(session: super::Session) -> c_int {
 pub fn kind_code(kind: SurfaceKind) -> c_int {
     match kind {
         SurfaceKind::Video => 0,
-        SurfaceKind::Web => 1,
+        SurfaceKind::WebFile | SurfaceKind::WebUrl => 1,
         SurfaceKind::Shader => 2,
         SurfaceKind::Image => 3,
     }
@@ -114,7 +114,7 @@ pub fn create_web_view(handle: *mut c_void, path: &std::path::Path) -> bool {
     let Some(path) = cstring(path) else {
         return false;
     };
-    unsafe { lively_create_view(handle, path.as_ptr(), kind_code(SurfaceKind::Web)) == 1 }
+    unsafe { lively_create_view(handle, path.as_ptr(), kind_code(SurfaceKind::WebUrl)) == 1 }
 }
 
 pub fn web_set_paused(handle: *mut c_void, paused: bool) -> bool {

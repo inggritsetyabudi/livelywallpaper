@@ -371,7 +371,8 @@ fn auto_start_daemon() -> Result<bool> {
 fn validate_arguments(command: &Commands) -> Result<()> {
     match command {
         Commands::Set { path, .. } => {
-            EngineManager::resolve_target(path)?;
+            let resolved = resolve_set_target(path)?;
+            EngineManager::resolve_target(&resolved)?;
         }
         Commands::Volume { value } => {
             // Syntax only: whether a *relative* volume lands in range depends
@@ -393,6 +394,54 @@ fn validate_arguments(command: &Commands) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+/// Resolve what the user typed for `set` into something the engine can load.
+///
+/// A bare name is almost always a library id -- that is what the UI shows and
+/// what `lively list-library` prints -- so treat it as one before reporting
+/// "no such path". Paths, URLs and anything containing a separator are left
+/// alone.
+fn resolve_set_target(input: &str) -> Result<String> {
+    let trimmed = input.trim();
+
+    let looks_like_path = trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.starts_with('~')
+        || crate::engine::is_url(trimmed);
+
+    if !looks_like_path && !Path::new(trimmed).exists() {
+        if let Ok(library) = library::LibraryManager::new() {
+            if let Some(item) = library.find(trimmed) {
+                return Ok(item.path.to_string_lossy().into_owned());
+            }
+        }
+
+        // Not an id either: offer the nearest titles so the user can see what
+        // they could have typed.
+        let Ok(library) = library::LibraryManager::new() else {
+            return Ok(input.to_string());
+        };
+        let suggestions: Vec<String> = library
+            .items
+            .iter()
+            .filter(|item| item.title.to_lowercase().contains(&trimmed.to_lowercase()))
+            .take(3)
+            .map(|item| format!("{} (id: {})", item.title, item.id))
+            .collect();
+
+        if suggestions.is_empty() {
+            return Err(Error::Invalid(format!(
+                "`{trimmed}` is neither an existing path nor a library item"
+            )));
+        }
+        return Err(Error::Invalid(format!(
+            "`{trimmed}` is a library item name, not an id. Did you mean: {}",
+            suggestions.join(", ")
+        )));
+    }
+
+    Ok(input.to_string())
 }
 
 /// Forward a command to the running daemon and relay its reply.
@@ -455,7 +504,9 @@ fn to_ipc_command(command: &Commands) -> ipc::IpcCommand {
         | Commands::RemoveLibrary { .. } => ipc::IpcCommand::ShowApp,
 
         Commands::Set { path, monitor } => ipc::IpcCommand::SetWallpaper {
-            path: path.clone(),
+            // Resolved here as well: the daemon receives a concrete path, and a
+            // client that skipped validation still gets sane behaviour.
+            path: resolve_set_target(path).unwrap_or_else(|_| path.clone()),
             monitor: *monitor,
         },
         Commands::Close { monitor } => ipc::IpcCommand::CloseWallpaper { monitor: *monitor },

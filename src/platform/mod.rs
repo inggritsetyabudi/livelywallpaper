@@ -46,7 +46,11 @@ compile_error!(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceKind {
     Video,
-    Web,
+    /// An HTML file on disk, loaded with read access to its own directory.
+    WebFile,
+    /// A remote http(s) URL. Distinct from WebFile because the two need
+    /// different WebKit loaders, and passing a URL to the file loader raises.
+    WebUrl,
     Shader,
     Image,
 }

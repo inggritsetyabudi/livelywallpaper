@@ -505,10 +505,37 @@ void lively_destroy_video_view(void* player_ptr) {
     }
 }
 
+
+/*
+ * Runs a block, converting any Objective-C exception into `fallback`.
+ *
+ * A Rust `catch_unwind` cannot intercept a foreign exception: unwinding one
+ * into a Rust frame aborts the process outright. Everything crossing the FFI
+ * boundary that can plausibly throw -- WebKit in particular -- is therefore
+ * guarded here, so a bad wallpaper fails one command instead of killing the
+ * daemon.
+ */
+static void *lively_guarded(void *(^block)(void), void *fallback) {
+    @try {
+        return block();
+    } @catch (NSException *e) {
+        NSLog(@"[Lively] caught %@: %@", e.name, e.reason);
+        return fallback;
+    }
+}
+
+// Forward declarations: the guarded entry points sit above their bodies.
+static void *create_web_view_impl(void *win_ptr, const char *url_or_path, bool is_local_file);
+static void destroy_web_view_impl(void *web_ptr);
+
 #pragma mark - Web Engine (WKWebView)
 
 void* lively_create_web_view(void* win_ptr, const char* url_or_path, bool is_local_file) {
     if (!win_ptr || !url_or_path) return NULL;
+    return lively_guarded(^{ return create_web_view_impl(win_ptr, url_or_path, is_local_file); }, NULL);
+}
+
+static void *create_web_view_impl(void* win_ptr, const char* url_or_path, bool is_local_file) {
     @autoreleasepool {
         NSWindow *win = (__bridge NSWindow*)win_ptr;
         WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
@@ -633,6 +660,12 @@ void lively_web_resume(void* web_ptr) {
 // megabyte each time. Detach everything before releasing.
 void lively_destroy_web_view(void* web_ptr) {
     if (!web_ptr) return;
+    // Tearing down a WKWebView that is mid-load can raise; the handle is freed
+    // regardless, because leaking it is worse than losing the exception.
+    lively_guarded(^{ destroy_web_view_impl(web_ptr); return NULL; }, NULL);
+}
+
+static void destroy_web_view_impl(void* web_ptr) {
     @autoreleasepool {
         LivelyWebContext *ctx = (LivelyWebContext*)web_ptr;
 

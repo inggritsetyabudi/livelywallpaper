@@ -194,7 +194,7 @@ impl Platform for LinuxPlatform {
                 crate::platform::linux_sys::create_video_view(surface, target)?;
                 Ok(ViewHandle { ptr: surface, kind })
             }
-            SurfaceKind::Web if support.web => {
+            SurfaceKind::WebFile | SurfaceKind::WebUrl if support.web => {
                 crate::platform::linux_sys::create_web_view(surface, target)?;
                 Ok(ViewHandle { ptr: surface, kind })
             }
@@ -207,7 +207,7 @@ impl Platform for LinuxPlatform {
                  not include. Rebuild with `--features linux-video`."
                     .into(),
             )),
-            SurfaceKind::Web => Err(Error::Invalid(
+            SurfaceKind::WebFile | SurfaceKind::WebUrl => Err(Error::Invalid(
                 "web wallpapers need WebKitGTK, which this build does not include. \
                  Rebuild with `--features linux-web`."
                     .into(),
