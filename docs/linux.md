@@ -1,133 +1,115 @@
 # Linux support
 
-macOS makes wallpaper easy: an `NSWindow` placed below other windows. Linux has
-no equivalent in the base protocols, so support is split by window system, and
-one desktop environment is genuinely not supported.
+> ## Status: experimental — not built, not tested
+>
+> The Linux backend in this repository **has never been compiled or run.**
+> It was written ahead of the macOS work and has received no build fixes, no
+> test passes, and no runtime verification.
+>
+> It lives here because the platform seam was designed for it and because the
+> CI job that would compile it is declared. Treat everything below as a design
+> intent, not as a description of working software.
+>
+> Known unproven assumptions are listed in
+> [quality.md §5](quality.md#5-what-has-not-been-verified).
 
-## Summary
+## Why this is not simply "the same thing on Linux"
 
-| | Wallpapers | Video | Web | Image | Shader | GUI |
+macOS makes wallpaper easy: an `NSWindow` placed below every other window.
+Linux has no equivalent in the base protocols, so support necessarily splits
+by window system, and one common desktop is genuinely not supported.
+
+| Target | Status | Video | Web | Image | Shader | GUI |
 |---|---|---|---|---|---|---|
-| **macOS** | yes | AVFoundation | WKWebView | NSImage | Metal | SwiftUI |
-| **X11** | yes | GStreamer | WebKitGTK | Cairo | not yet | CLI only |
-| **Wayland (layer-shell)** | yes | GStreamer | **X11 only** | Cairo | not yet | CLI only |
-| **GNOME / Mutter** | **no** | — | — | — | — | — |
+| **macOS** | **verified** | AVFoundation | WKWebView | NSImage | Metal | SwiftUI |
+| **X11** | *unbuilt* | GStreamer | WebKitGTK | Cairo | not implemented | CLI only |
+| **Wayland** (layer-shell) | *unbuilt* | GStreamer | X11 only | Cairo | not implemented | CLI only |
+| **GNOME / Mutter** | **not supported** | — | — | — | — | — |
 
-Image and video render straight into the wallpaper surface. Web wallpapers are
-a GTK toplevel instead — WebKitGTK only renders into a `GtkWindow`, and GTK
-offers no way to adopt our layer-surface — so on Wayland they are refused rather
-than shown as a blank window.
-
-The shader renderer is not implemented on Linux; it reports that rather than
-showing black.
+Image and video are intended to render straight into the wallpaper surface.
+Web wallpapers are intended to be a GTK toplevel instead — WebKitGTK only
+renders into a `GtkWindow`, and GTK offers no way to adopt our layer-surface —
+so on Wayland they are expected to be refused rather than shown as a blank
+window.
 
 ## Why GNOME is not supported
 
 Wayland's core protocol has no concept of "a window beneath other windows". A
-compositor draws its own wallpaper and nothing else may sit underneath.
+compositor draws its own background and nothing else may sit underneath it.
 
-The closest thing is `zwlr_layer_shell_v1`, with `layer = "bottom"`. It is
-implemented by:
+The closest available mechanism is `zwlr_layer_shell_v1` with
+`layer = "bottom"`, implemented by wlroots-based compositors and KDE Plasma 6:
 
-- Sway, Hyprland, river, niri, wayfire, dwl, Qtile (Wayland), any wlroots compositor
+- Sway
+- Hyprland
+- river
+- niri
 - KDE Plasma 6
 
-**GNOME/Mutter implements neither layer-shell nor any public wallpaper API.**
-The commonly circulated workarounds reach into Mutter's private behaviour —
-GNOME Shell extensions that reparent windows, or abusing `gdk_set_input_shape`
-— and they break between releases. On GNOME, Lively will report that it cannot
-create a wallpaper surface rather than silently showing nothing.
+GNOME's Mutter implements neither layer-shell nor any equivalent, and does not
+expose a way to replace the desktop background. No workaround exists short of
+patching the shell. Lively reports the limitation rather than drawing a
+window the user did not ask for.
 
-KDE Plasma 5 (X11) is a special case: Plasma 5 replaced its wallpaper QML
-pluggable with a static colour, so wallpaper plugins do not work there either.
+## Build
 
-## Building
+Media support is behind Cargo features so that `cargo build` succeeds on a
+machine without the media stack installed.
 
-```sh
-# X11 + Wayland layer-shell surfaces, images via Cairo
-cargo build --release
+| Feature | Default | Pulls in |
+|---|---|---|
+| `linux-wayland` | **yes** | XCB, Cairo, EGL, `zwlr_layer_shell_v1` |
+| `linux-video` | no | GStreamer 1.x |
+| `linux-web` | no | WebKitGTK 4.1 |
 
-# With video wallpapers (GStreamer)
-sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
-cargo build --release --features linux-video
+```console
+$ sudo apt-get install -y \
+    libxcb1-dev libcairo2-dev libegl1-mesa-dev libgl1-mesa-dev \
+    libwayland-dev wayland-protocols \
+    libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+    libwebkit2gtk-4.1-dev
 
-# With web wallpapers (WebKitGTK)
-sudo apt install libwebkit2gtk-4.1-dev
-cargo build --release --features linux-web
+$ cargo build --release --features linux-video,linux-web
 ```
 
-The media features are opt-in so a plain `cargo build` still succeeds on a
-machine with neither stack installed. When a renderer is not compiled in, the
-daemon says so explicitly instead of failing at the point of use.
+## Runtime expectations
 
-## Verifying
+`lively screens` reports what the current session actually supports, and each
+renderer reports its own capability rather than failing opaquely:
 
-**The Linux build has never been run, and has never even been syntax-checked.**
-It was written on macOS, where neither Docker, a cross-toolchain, nor the Cairo
-and XCB development headers are available — `gcc -fsyntax-only` fails at the
-first `#include <cairo/cairo.h>`.
-
-Three bugs in the C shim were caught by reading it rather than compiling it:
-
-- `gst_bus_add_watch` dispatches from a GLib main loop this daemon does not
-  run, so EOS and errors would never have been observed. Replaced with
-  `gst_bus_set_sync_handler`, which runs inside the state change.
-- `video-changed` was connected to `playbin`, which is not a signal on it, and
-  before the element was added to the bin. Removed.
-- Nothing looped the video, so a wallpaper would stop at the end of the file.
-  The bus handler now seeks back on EOS, matching `AVPlayerLooper` on macOS.
-
-Treat those as the floor, not the ceiling: expect more.
-
-`.github/workflows/build.yml` is therefore the real test: it builds the Linux
-matrix on Ubuntu, runs `fmt`, `clippy -D warnings` and the test suite. Until
-that workflow is green, treat Linux as unverified.
-
-If you are porting or extending this, run it before trusting it:
-
-```sh
-# what CI runs on Ubuntu
-sudo apt install libxcb1-dev libcairo2-dev libegl1-mesa-dev libgl1-mesa-dev \
-  libwayland-dev wayland-protocols
-cargo build --release --features linux-video
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --all-targets
+```console
+$ lively screens
+  screen 0:  Built-in Display (WAYLAND)
+    video: unavailable — built without the linux-video feature
+    web:   unsupported on Wayland — use an X11 session
+    image: ok
+    shader: not implemented on Linux
 ```
 
-Under a real session:
+Failing loudly is the intended behaviour everywhere. A renderer that cannot
+work reports why; it does not render a black rectangle and let the user
+wonder.
 
-```sh
-WAYLAND_DISPLAY=wayland-1 ./target/release/livelywallpaper daemon &
-./target/release/livelywallpaper set plasma-drift
-```
+## Known gaps
 
-An unsupported compositor produces a message naming the problem, not a silent
-blank desktop:
+Beyond the unverified-status caveat above, these are gaps by construction:
 
-```
-error: could not create a layer-shell surface. This compositor does not
-       implement wlr-layer-shell (GNOME/Mutter does not).
-```
+- The shader renderer is not implemented on Linux.
+- There is no Linux GUI — CLI only.
+- The Wayland path detects `zwlr_layer_shell_v1` through the registry but does
+  not yet create a `wl_surface`.
+- `SurfaceRecord` (Rust) and `LivelySurface` (C) are assumed to share a layout
+  and ownership convention. Nothing enforces or checks this assumption, and it
+  has never been exercised.
+- The Linux event loop is unimplemented.
 
-## Architecture
+## How to move this to "verified"
 
-All OS-specific code sits behind the `Platform` trait in `src/platform/mod.rs`:
-
-```
-src/platform/
-  mod.rs        trait + SurfaceKind + PlaybackState, and the GNOME caveat
-  macos.rs      wraps the Objective-C layer in src/native
-  linux.rs      session detection, capability reporting, error wording
-  linux_sys.rs  thin Rust FFI over the C shim
-  native/
-    lively_linux.c   XCB + Cairo + Wayland layer-shell
-```
-
-`SurfaceKind` and `PlaybackState` are the shared vocabulary. The `kind` travels
-with a `ViewHandle` so teardown and transport calls dispatch correctly without
-re-inferring the type.
-
-The CLI, IPC, library, config, and wallpaper routing are plain Rust and compile
-everywhere — that is why the trait exists rather than `#[cfg]` scattered through
-the engine.
+1. Get the CI Linux job green — it is the only place this code compiles today.
+2. Replace the assumed struct layout with an explicit C-ABI type, or move the
+   record entirely into C and hand Rust an opaque handle.
+3. Implement `wl_surface` creation for the layer-shell path.
+4. Render one image wallpaper on X11 and one on Wayland, and screenshot both.
+5. Run the memory and stability soaks from [quality.md](quality.md) on Linux.
+6. Add the UI self-test equivalent to the X11/Wayland GUI, or document that
+   there is no GUI.

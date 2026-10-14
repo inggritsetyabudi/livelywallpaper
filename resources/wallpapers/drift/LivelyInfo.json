@@ -3,7 +3,7 @@
   "Title": "Drift",
   "Desc": "Three colour fields drifting on long, offset loops. Pure CSS — no images, no scripts.",
   "Author": "Lively",
-  "License": "MIT",
+  "License": "Apache-2.0",
   "Type": 1,
   "FileName": "index.html",
   "Thumbnail": "thumb.png",

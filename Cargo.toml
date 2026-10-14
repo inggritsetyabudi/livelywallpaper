@@ -3,8 +3,8 @@ name = "livelywallpaper"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Animated desktop wallpapers for macOS"
-license = "MIT"
+description = "Native live wallpaper engine for macOS with a SwiftUI settings window"
+license = "Apache-2.0"
 
 # Only the crates actually linked into the binary. Everything here is used;
 # adding an unused dependency costs build time and attack surface.

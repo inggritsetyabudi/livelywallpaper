@@ -1,0 +1,43 @@
+Lively Wallpaper
+Copyright 2026 The Lively Wallpaper Authors
+
+This product includes software developed by the Lively Wallpaper Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+---
+
+Bundled wallpapers
+------------------
+
+The six wallpapers shipped in resources/wallpapers/ (Midnight Mesh, Ember,
+Tidal, Graphite, Drift, Plasma Drift) are part of this project and are
+licensed under the Apache License, Version 2.0.
+
+Third-party dependencies
+------------------------
+
+This project depends on the following Rust crates, each under the MIT or
+Apache-2.0 licence:
+
+  clap          MIT OR Apache-2.0
+  env_logger    MIT OR Apache-2.0
+  log           MIT OR Apache-2.0
+  serde         MIT OR Apache-2.0
+  serde_json    MIT OR Apache-2.0
+  thiserror     MIT OR Apache-2.0
+  cc            MIT OR Apache-2.0   (build dependency)
+
+On macOS the project links against system frameworks (AppKit, AVFoundation,
+WebKit, Metal, CoreGraphics), which are provided by the operating system and
+covered by Apple's own licence terms.

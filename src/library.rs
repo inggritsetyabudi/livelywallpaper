@@ -35,7 +35,7 @@ pub struct LibraryItem {
 const BUILTIN_STAMP: &str = ".lively-builtin";
 
 /// Bump to refresh every built-in wallpaper on the next launch.
-const BUILTIN_VERSION: &str = "1";
+const BUILTIN_VERSION: &str = "2";
 
 /// Largest media file we will copy into the library. Anything bigger is almost
 /// certainly a mistake, and copying it would block the daemon.

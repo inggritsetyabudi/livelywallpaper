@@ -3,7 +3,7 @@
   "Title": "Plasma Drift",
   "Desc": "GPU-rendered domain-warped noise. Runs entirely on the Metal shader engine at 60fps.",
   "Author": "Lively",
-  "License": "MIT",
+  "License": "Apache-2.0",
   "Type": 6,
   "FileName": "shader.metal",
   "Thumbnail": "thumb.png",
