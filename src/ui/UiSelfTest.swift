@@ -46,6 +46,22 @@ enum UiSelfTest {
 
         // --- library ---------------------------------------------------------
         check("library is not empty", !model.isLibraryEmpty, "(\(model.library.count) items)")
+
+        // --- sidebar navigation ---------------------------------------------
+        // The sidebar rows used `NavigationLink(value:)` with no
+        // NavigationStack and no navigationDestination, so "Screens" and
+        // "Settings" did nothing at all. These assert the state those rows now
+        // drive, which is the part a click actually reaches.
+        check("sidebar starts on the library", model.section == .library)
+        model.go(.screens)
+        check("sidebar switches to screens", model.section == .screens)
+        check("screens view has screens to show", !model.screens.isEmpty,
+              "(\(model.screens.count))")
+        model.go(.settings)
+        check("sidebar switches to settings", model.section == .settings)
+        check("settings has a config to render", model.config != nil)
+        model.go(.library)
+        check("sidebar returns to the library", model.section == .library)
         check("library loads built-ins", model.builtins.count >= 6, "(\(model.builtins.count))")
         check("built-ins partition correctly",
               model.builtins.allSatisfy(\.isBuiltin) && model.imported.allSatisfy { !$0.isBuiltin },

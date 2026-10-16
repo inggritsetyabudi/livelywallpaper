@@ -89,6 +89,16 @@ struct ScreenEntry: Identifiable, Decodable, Hashable {
     var id: UInt32 { index }
 }
 
+/// Which sidebar page the detail column is showing.
+///
+/// Named `SidebarPage` rather than `Section`: SwiftUI has its own `Section`,
+/// and a same-named type here silently shadowed it inside the sidebar.
+enum SidebarPage: Hashable {
+    case library
+    case screens
+    case settings
+}
+
 struct ConfigView: Decodable, Hashable {
     let volume: Float
     let volumePercent: UInt32
@@ -206,6 +216,14 @@ final class AppModel: NSObject, ObservableObject {
     @Published var config: ConfigView?
     @Published var properties: [PropertyEntry] = []
 
+    /// Which sidebar page is showing.
+    ///
+    /// The sidebar used `NavigationLink(value:)` with no `NavigationStack` and
+    /// no `navigationDestination`, so clicking "Screens" or "Settings" did
+    /// nothing at all: no destination existed to push to. Selection state has
+    /// to live somewhere real for those pages to render.
+    @Published var section: SidebarPage = .library
+
     @Published var selectedId: String?
     @Published var targetScreen: UInt32 = 0
     @Published var searchText: String = ""
@@ -216,6 +234,11 @@ final class AppModel: NSObject, ObservableObject {
     /// State of the video on the targeted screen, when there is one. Lets the
     /// window say "Loading…" or "Failed to load" instead of showing black.
     @Published var playback: PlaybackView?
+
+    /// Title of the current selection, for status messages.
+    var selectedTitle: String {
+        library.first { $0.id == selectedId }?.title ?? "wallpaper"
+    }
 
     private var window: NSWindow?
 
@@ -438,6 +461,32 @@ reload()
     }
 
     /// Remove the wallpaper from a screen, used by the sidebar context menu.
+    /// Applies the current selection to a specific screen.
+    func applySelected(to index: UInt32) {
+        guard let id = selectedId else { return }
+        guard send("apply", ["id": id, "screen": Int(index)]) else { return }
+        statusMessage = "Applied \(selectedTitle) to screen \(index + 1)."
+    }
+
+    /// Applies the current selection to every screen at once.
+    ///
+    /// Looped client-side rather than adding an `applyAll` IPC action: the
+    /// daemon already handles `apply` for one screen, and a second verb would
+    /// need its own error paths and tests for no gain.
+    func applySelectedToAll() {
+        guard selectedId != nil else { return }
+        let count = screens.count
+        for screen in screens {
+            _ = send("apply", ["id": selectedId ?? "", "screen": Int(screen.index)])
+        }
+        statusMessage = "Applied \(selectedTitle) to all \(count) screen(s)."
+    }
+
+    /// Loads the library page, or whichever screen the user was last on.
+    func go(_ target: SidebarPage) {
+        section = target
+    }
+
     func clearScreen(_ index: UInt32) {
         guard send("closeWallpaper", ["monitor": Int(index)]) else { return }
         statusMessage = "Removed the wallpaper from screen \(index + 1)."

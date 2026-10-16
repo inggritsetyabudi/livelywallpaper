@@ -10,14 +10,13 @@ struct ContentView: View {
             sidebar
                 .navigationSplitViewColumnWidth(min: 190, ideal: 210, max: 260)
         } detail: {
-            HSplitView {
-                libraryColumn
-                    .frame(minWidth: 300, idealWidth: 380)
-
-                rightColumn
-                    .frame(minWidth: 280, idealWidth: 320)
+            // Previously this always rendered the library, so even a working
+            // sidebar selection would not have changed the page.
+            switch model.section {
+            case .library: libraryView
+            case .screens: ScreensView()
+            case .settings: SettingsView()
             }
-            .frame(minWidth: 640, idealWidth: 700)
         }
         .toolbar { toolbarContent }
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search wallpapers")
@@ -60,17 +59,11 @@ struct ContentView: View {
     // MARK: Sidebar
 
     private var sidebar: some View {
-        List(selection: sidebarSelection) {
+        List {
             Section("Library") {
-                NavigationLink(value: Selection.library) {
-                    Label("All Wallpapers", systemImage: "square.grid.2x2")
-                }
-                NavigationLink(value: Selection.screens) {
-                    Label("Screens", systemImage: "display")
-                }
-                NavigationLink(value: Selection.settings) {
-                    Label("Settings", systemImage: "gearshape")
-                }
+                sidebarButton("All Wallpapers", "square.grid.2x2", .library)
+                sidebarButton("Screens", "display", .screens)
+                sidebarButton("Settings", "gearshape", .settings)
             }
 
             if !model.screens.isEmpty {
@@ -113,15 +106,62 @@ struct ContentView: View {
         screen.currentTitle == nil ? .secondary : .accentColor
     }
 
+    /// One sidebar row.
+    ///
+    /// A plain Button rather than `NavigationLink(value:)`: there is no
+    /// `NavigationStack` in this window, so a value-based link had nowhere to
+    /// push and silently did nothing.
+    private func sidebarButton(_ title: String, _ icon: String, _ target: SidebarPage) -> some View {
+        let active = model.section == target
+        return Button {
+            model.go(target)
+        } label: {
+            Label(title, systemImage: icon)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+                .foregroundStyle(active ? Color.white : Color.primary)
+        }
+        .buttonStyle(.plain)
+        .listRowBackground(active ? Color.accentColor.opacity(0.28) : Color.clear)
+        .accessibilityAddTraits(active ? [.isSelected] : [])
+    }
+
     private var sidebarSelection: Binding<Selection?> {
         Binding(
-            get: { model.selectedId.map { Selection.item($0) } },
+            get: {
+                switch model.section {
+                case .library: return model.selectedId.map { Selection.item($0) } ?? .library
+                case .screens: return .screens
+                case .settings: return .settings
+                }
+            },
             set: { newValue in
-                guard case .item(let id) = newValue else { return }
-                guard let entry = model.library.first(where: { $0.id == id }) else { return }
-                model.select(entry)
+                switch newValue {
+                case .library: model.go(.library)
+                case .screens: model.go(.screens)
+                case .settings: model.go(.settings)
+                case .item(let id):
+                    // Selecting a wallpaper means "show the library, with this
+                    // one selected" -- otherwise clicking a card would leave the
+                    // user stranded on the Screens page.
+                    model.go(.library)
+                    guard let entry = model.library.first(where: { $0.id == id }) else { return }
+                    model.select(entry)
+                case .none: break
+                }
             }
         )
+    }
+
+    private var libraryView: some View {
+        HSplitView {
+            libraryColumn
+                .frame(minWidth: 300, idealWidth: 380)
+
+            rightColumn
+                .frame(minWidth: 280, idealWidth: 320)
+        }
+        .frame(minWidth: 640, idealWidth: 700)
     }
 
     // MARK: Library
@@ -812,4 +852,254 @@ func presentImportPanel() {
 
     guard panel.runModal() == .OK, let url = panel.url else { return }
     AppModel.shared.importWallpaper(at: url.path)
+}
+
+// MARK: - Screens
+
+/// Per-monitor overview.
+///
+/// Shows what is actually on each display right now, with the actions that
+/// only make sense per display: change it, clear it, or push one wallpaper to
+/// every screen at once.
+struct ScreensView: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                header
+
+                if model.screens.isEmpty {
+                    empty
+                } else {
+                    ForEach(model.screens) { screen in
+                        card(for: screen)
+                    }
+                }
+
+                if model.screens.count > 1 {
+                    applyToAll
+                }
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(minWidth: 640, idealWidth: 700)
+        .onAppear { model.reload() }
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            SectionHeader(
+                title: "Screens",
+                subtitle: "\(model.screens.count) display\(model.screens.count == 1 ? "" : "s") attached",
+                systemImage: "display"
+            )
+        }
+    }
+
+    private var empty: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "display.trianglebadge.exclamationmark")
+                .font(.system(size: 34))
+                .foregroundStyle(.secondary)
+            Text("No screens detected")
+                .font(.headline)
+            Text("The daemon has not reported any displays yet.")
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 48)
+    }
+
+    private func card(for screen: ScreenEntry) -> some View {
+        HStack(alignment: .top, spacing: 16) {
+            // Resolution is the most useful fact about a display at a glance,
+            // and it doubles as a shape hint for the card.
+            RoundedRectangle(cornerRadius: 8)
+                .fill(.quaternary)
+                .aspectRatio(
+                    CGFloat(screen.width) / CGFloat(max(screen.height, 1)),
+                    contentMode: .fit
+                )
+                .frame(width: 132)
+                .overlay {
+                    Text("\(screen.width)×\(screen.height)")
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Screen \(screen.index + 1)")
+                    .font(.headline)
+                Text(screen.name)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 6) {
+                    if let title = screen.currentTitle {
+                        Text(title)
+                            .font(.callout)
+                            .fontWeight(.medium)
+                    } else {
+                        Text("No wallpaper set")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(.top, 2)
+
+                HStack(spacing: 10) {
+                    Button("Clear") { model.clearScreen(screen.index) }
+                        .disabled(screen.currentId == nil)
+
+                    Button("Use selected wallpaper") {
+                        model.applySelected(to: screen.index)
+                    }
+                    .disabled(model.selectedId == nil)
+                }
+                .controlSize(.small)
+                .padding(.top, 4)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 10)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        )
+    }
+
+    private var applyToAll: some View {
+        HStack {
+            Button {
+                model.applySelectedToAll()
+            } label: {
+                Label("Apply selected wallpaper to all screens", systemImage: "rectangle.on.rectangle")
+            }
+            .disabled(model.selectedId == nil)
+            Spacer()
+        }
+        .controlSize(.regular)
+    }
+}
+
+// MARK: - Settings
+
+/// Preferences that apply to the whole engine rather than one wallpaper.
+struct SettingsView: View {
+    @EnvironmentObject var model: AppModel
+
+    private var config: ConfigView? { model.config }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                SectionHeader(
+                    title: "Settings",
+                    subtitle: "Applies to every wallpaper",
+                    systemImage: "gearshape"
+                )
+
+                if let config {
+                    playbackSection(config)
+                    behaviourSection(config)
+                    layoutSection(config)
+                } else {
+                    Text("Loading settings…")
+                        .foregroundStyle(.secondary)
+                }
+
+                engineInfo
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(minWidth: 640, idealWidth: 700)
+        .onAppear { model.reload() }
+    }
+
+    private func playbackSection(_ config: ConfigView) -> some View {
+        settingsGroup("Playback", icon: "play.circle") {
+            Toggle("Pause during a fullscreen app", isOn: Binding(
+                get: { config.pauseOnFullscreen },
+                set: { model.setConfig("pauseOnFullscreen", $0) }
+            ))
+            Toggle("Pause on battery power", isOn: Binding(
+                get: { config.pauseOnBattery },
+                set: { model.setConfig("pauseOnBattery", $0) }
+            ))
+            Toggle("Audio visualiser", isOn: Binding(
+                get: { config.audioVisualizerEnabled },
+                set: { model.setConfig("audioVisualizerEnabled", $0) }
+            ))
+        }
+    }
+
+    private func behaviourSection(_ config: ConfigView) -> some View {
+        settingsGroup("Behaviour", icon: "wand.and.stars") {
+            Toggle("Muted", isOn: Binding(
+                get: { config.isMuted },
+                set: { model.setConfig("isMuted", $0) }
+            ))
+            Picker("Paused", selection: Binding(
+                get: { config.isPaused },
+                set: { model.setConfig("isPaused", $0) }
+            )) {
+                Text("Playing").tag(false)
+                Text("Paused").tag(true)
+            }
+            .pickerStyle(.segmented)
+        }
+    }
+
+    private func layoutSection(_ config: ConfigView) -> some View {
+        settingsGroup("Multi-display layout", icon: "rectangle.3.group") {
+            Picker("Layout", selection: Binding(
+                get: { config.layoutMode },
+                set: { model.setConfig("layoutMode", $0) }
+            )) {
+                Text("Per screen").tag(0)
+                Text("Span all screens").tag(1)
+                Text("Duplicate").tag(2)
+            }
+            Text("Only applies once more than one display is attached.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var engineInfo: some View {
+        settingsGroup("Engine", icon: "info.circle") {
+            LabeledContent("Renderer", value: "macOS — Metal, WKWebView, AVFoundation")
+            LabeledContent("Build", value: Bundle.main.appVersion ?? "dev")
+        }
+    }
+
+    private func settingsGroup<Content: View>(
+        _ title: String,
+        icon: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label(title, systemImage: icon)
+                .font(.headline)
+            VStack(alignment: .leading, spacing: 8) {
+                content()
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color(nsColor: .controlBackgroundColor))
+            )
+        }
+    }
+}
+
+private extension Bundle {
+    var appVersion: String? {
+        object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+    }
 }
