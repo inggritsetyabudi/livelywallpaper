@@ -100,6 +100,7 @@ enum SidebarPage: Hashable {
 }
 
 struct ConfigView: Decodable, Hashable {
+    let path: String
     let volume: Float
     let volumePercent: UInt32
     let isMuted: Bool
@@ -234,6 +235,35 @@ final class AppModel: NSObject, ObservableObject {
     /// State of the video on the targeted screen, when there is one. Lets the
     /// window say "Loading…" or "Failed to load" instead of showing black.
     @Published var playback: PlaybackView?
+
+    /// Values the user is dragging right now.
+    ///
+    /// A slider bound straight to the daemon's value cannot move: that value
+    /// only changes when a fresh snapshot arrives, so the getter keeps
+    /// returning the old number and the thumb springs back. This overlay holds
+    /// the in-flight value so the control tracks the pointer, and is cleared
+    /// once the daemon confirms the change.
+    ///
+    /// Held here rather than in `@State` because this build does not link the
+    /// SwiftUI macro plugin `@State` needs, and it is the one property wrapper
+    /// the rest of this UI has never had to use.
+    @Published var sliderDrafts: [String: Double] = [:]
+
+    func beginDraft(_ key: String) {
+        // No-op: presence is what matters. Kept for readability at call sites.
+    }
+
+    func draft(_ key: String, fallback: Double) -> Double {
+        sliderDrafts[key] ?? fallback
+    }
+
+    func setDraft(_ key: String, _ value: Double) {
+        sliderDrafts[key] = value
+    }
+
+    func clearDraft(_ key: String) {
+        sliderDrafts.removeValue(forKey: key)
+    }
 
     /// Title of the current selection, for status messages.
     var selectedTitle: String {

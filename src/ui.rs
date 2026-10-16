@@ -108,6 +108,9 @@ pub struct ScreenEntry {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigView {
+    /// Where the settings are stored, so the About panel can show it without
+    /// Swift having to duplicate the platform path rules.
+    pub path: String,
     volume: f32,
     volume_percent: u32,
     is_muted: bool,
@@ -417,6 +420,24 @@ fn dispatch(request: &UiRequest, state: &AppState) -> Result<Option<PlaybackView
             let mut cfg = LivelyConfig::load();
             apply_config_change(&mut cfg, key, &value)?;
             cfg.save()?;
+
+            // Persisting is not the same as applying. Without this the toggle
+            // would show the new value while the engine kept playing audio.
+            if matches!(key, "isMuted" | "isPaused") {
+                let muted = cfg.is_muted;
+                let paused = cfg.is_paused;
+                state.with_engine(|e| {
+                    e.is_muted = muted;
+                    e.is_paused = paused;
+                    if muted || paused {
+                        e.set_volume(0.0);
+                    } else {
+                        e.set_volume(cfg.volume);
+                    }
+                    Ok(())
+                })?;
+            }
+
             // Automation flags are captured when the watcher starts, so restart it.
             if matches!(key, "pauseOnFullscreen" | "pauseOnBattery") {
                 crate::restart_automation_watcher(state, &cfg)?;
@@ -486,6 +507,11 @@ fn apply_config_change(cfg: &mut LivelyConfig, key: &str, value: &serde_json::Va
         "pauseOnBattery" => cfg.pause_on_battery = value.as_bool().unwrap_or(false),
         "audioVisualizerEnabled" => cfg.audio_visualizer_enabled = value.as_bool().unwrap_or(false),
         "interactiveMouse" => cfg.interactive_mouse = value.as_bool().unwrap_or(false),
+        // These two were missing. The Settings page has had toggles for them
+        // since it was written, and every click came back
+        // `unknown setting` -- the UI shipped controls that could not work.
+        "isMuted" => cfg.is_muted = value.as_bool().unwrap_or(false),
+        "isPaused" => cfg.is_paused = value.as_bool().unwrap_or(false),
         "layoutMode" => {
             let mode = value.as_i64().unwrap_or(0);
             if !(0..=2).contains(&mode) {
@@ -571,6 +597,7 @@ pub fn build_snapshot(state: &AppState, selected: Option<&str>) -> Result<StateS
         library: library_entries,
         screens,
         config: ConfigView {
+            path: LivelyConfig::config_path().display().to_string(),
             volume,
             volume_percent: (volume * 100.0).round() as u32,
             is_muted,

@@ -18,7 +18,9 @@ struct ContentView: View {
             case .settings: SettingsView()
             }
         }
+        .background { AuroraBackdrop() }
         .toolbar { toolbarContent }
+        .goldenGateTint()
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Search wallpapers")
         .alert(
             "Could not complete that",
@@ -122,7 +124,24 @@ struct ContentView: View {
                 .foregroundStyle(active ? Color.white : Color.primary)
         }
         .buttonStyle(.plain)
-        .listRowBackground(active ? Color.accentColor.opacity(0.28) : Color.clear)
+        .listRowBackground(
+            Group {
+                if active {
+                    // The active page is a glass capsule, not a flat bar. This
+                    // is the single strongest cue about where you are.
+                    ActiveRowBackground()
+                }
+            }
+        )
+        .overlay(alignment: .leading) {
+            if active {
+                Capsule()
+                    .fill(GoldenGate.tint)
+                    .frame(width: 3, height: 18)
+                    .padding(.leading, 6)
+            }
+        }
+        .foregroundStyle(active ? GoldenGate.tint : .primary)
         .accessibilityAddTraits(active ? [.isSelected] : [])
     }
 
@@ -234,6 +253,15 @@ struct ContentView: View {
 
     @ViewBuilder
     private var rightColumn: some View {
+        detailBody
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .glassCard(cornerRadius: 18)
+            .glassEdge(cornerRadius: 18, highlighted: false)
+            .shadow(color: .black.opacity(0.4), radius: 26, y: 10)
+    }
+
+    private var detailBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             if let entry = model.library.first(where: { $0.id == model.selectedId }) {
                 DetailsPane(entry: entry)
@@ -305,18 +333,14 @@ struct PlaybackControls: View {
             .help(config.isMuted ? "Unmute" : "Mute")
 
             HStack(spacing: 6) {
-                Slider(
-                    value: Binding(
-                        get: { Double(config.volumePercent) },
-                        // Live feedback while dragging, commit on release.
-                        set: { _ in }
-                    ),
-                    in: 0...100,
-                    onEditingChanged: { editing in
-                        if !editing { model.setVolume(Double(config.volumePercent)) }
-                    }
+                CommitSlider(
+                    key: "__volume",
+                    value: Double(config.volumePercent),
+                    range: 0...100,
+                    step: 1,
+                    width: 110,
+                    onCommit: { model.setVolume($0) }
                 )
-                .frame(width: 110)
                 .disabled(config.isMuted)
 
                 Text("\(config.volumePercent)%")
@@ -400,15 +424,12 @@ struct WallpaperCard: View {
             }
         }
         .padding(8)
-        .background(
-            RoundedRectangle(cornerRadius: 9)
-                .fill(isSelected ? Color.accentColor.opacity(0.16) : Color.clear)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 9)
-                .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 2)
-        )
-        .contentShape(RoundedRectangle(cornerRadius: 9))
+        .glassCard(cornerRadius: 13, tint: isSelected ? GoldenGate.tint : nil)
+        .glassEdge(cornerRadius: 13, highlighted: isSelected)
+        .shadow(color: isSelected ? GoldenGate.tint.opacity(0.30) : .clear, radius: 14, y: 4)
+        .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .scaleEffect(isSelected ? 1.02 : 1)
+        .animation(LivelyMotion.select, value: isSelected)
         .onTapGesture(perform: onTap)
     }
 
@@ -716,16 +737,12 @@ struct PropertyRow: View {
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
             }
-            Slider(
-                value: Binding(
-                    get: { current },
-                    set: { _ in }
-                ),
-                in: lower...max(upper, lower + 0.0001),
+            CommitSlider(
+                key: property.key,
+                value: current,
+                range: lower...max(upper, lower + 0.0001),
                 step: property.step ?? 1,
-                onEditingChanged: { editing in
-                    if !editing { model.setProperty(property.key, current) }
-                }
+                onCommit: { model.setProperty(property.key, $0) }
             )
         }
     }
@@ -756,16 +773,28 @@ struct PropertyRow: View {
         }
     }
 
+    /// A colour needs an editor, not a swatch. This row displayed the value
+    /// with no way to change it, so any package shipping a `color` property
+    /// got a control the user could not touch.
     private var colorRow: some View {
         LabeledContent(property.label) {
             HStack(spacing: 6) {
-                Circle()
-                    .fill(Color(hex: property.value?.stringValue ?? "#000000"))
-                    .frame(width: 14, height: 14)
+                ColorPicker(
+                    "",
+                    selection: Binding(
+                        get: { Color(hex: property.value?.stringValue ?? "#000000") },
+                        set: { model.setProperty(property.key, $0.hexString ?? "#000000") }
+                    ),
+                    supportsOpacity: false
+                )
+                .labelsHidden()
+                .frame(width: 20)
+
                 Text(property.value?.stringValue ?? "—")
                     .font(.caption)
                     .monospaced()
                     .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
             }
         }
     }
@@ -793,7 +822,7 @@ struct EmptyLibraryView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 280)
             Button("Import Wallpaper…", action: chooseFile)
-                .buttonStyle(.borderedProminent)
+                .livelyPrimaryButton()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -836,6 +865,18 @@ extension Color {
             opacity: 1
         )
     }
+
+    /// `#rrggbb`, for handing an edited colour back to the daemon.
+    ///
+    /// Routed through NSColor so the conversion uses a defined colour space
+    /// rather than assuming which components SwiftUI happens to be holding.
+    var hexString: String? {
+        guard let c = NSColor(self).usingColorSpace(.sRGB) else { return nil }
+        return String(format: "#%02x%02x%02x",
+                      Int((c.redComponent * 255).rounded()),
+                      Int((c.greenComponent * 255).rounded()),
+                      Int((c.blueComponent * 255).rounded()))
+    }
 }
 
 // MARK: - Import
@@ -854,6 +895,48 @@ func presentImportPanel() {
     AppModel.shared.importWallpaper(at: url.path)
 }
 
+/// A slider that moves while you drag it and commits once on release.
+///
+/// Binding straight to the daemon's value cannot work. That value only changes
+/// when a fresh snapshot arrives from the round trip, so during a drag the
+/// getter keeps returning the old number and the thumb springs back to where it
+/// started -- the control appears completely dead. Both the master volume
+/// slider and every wallpaper property slider were written this way.
+///
+/// The draft holds the in-flight value; committing clears it so the control
+/// goes back to following the daemon, including any correction it makes.
+struct CommitSlider: View {
+    let key: String
+    let value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    var width: CGFloat?
+    let onCommit: (Double) -> Void
+
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        Slider(
+            value: Binding(
+                get: { model.draft(key, fallback: value) },
+                set: { model.setDraft(key, $0) }
+            ),
+            in: range,
+            step: step,
+            onEditingChanged: { editing in
+                guard !editing else { return }
+                let pending = model.draft(key, fallback: value)
+                model.clearDraft(key)
+                onCommit(pending)
+            }
+        )
+        .frame(width: width)
+        // The daemon has the final word: if it corrects or clamps the value,
+        // follow it once the drag is over.
+        .onChange(of: value) { _, _ in model.clearDraft(key) }
+    }
+}
+
 // MARK: - Screens
 
 /// Per-monitor overview.
@@ -866,122 +949,178 @@ struct ScreensView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 22) {
                 header
 
                 if model.screens.isEmpty {
                     empty
                 } else {
                     ForEach(model.screens) { screen in
-                        card(for: screen)
+                        ScreenCard(screen: screen)
                     }
-                }
 
-                if model.screens.count > 1 {
+                    // Always present, even with one display. Hiding it left a
+                    // single-screen page looking broken and unfinished.
                     applyToAll
                 }
+
+                diagnosticsHint
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // Without a width cap the controls stretch the full width of a
+            // maximised window and read as an unfinished form.
+            .frame(maxWidth: 560, alignment: .leading)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 24)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
-        .frame(minWidth: 640, idealWidth: 700)
+        .frame(minWidth: 560, idealWidth: 640)
         .onAppear { model.reload() }
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            SectionHeader(
-                title: "Screens",
-                subtitle: "\(model.screens.count) display\(model.screens.count == 1 ? "" : "s") attached",
-                systemImage: "display"
-            )
-        }
-    }
-
-    private var empty: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "display.trianglebadge.exclamationmark")
-                .font(.system(size: 34))
-                .foregroundStyle(.secondary)
-            Text("No screens detected")
-                .font(.headline)
-            Text("The daemon has not reported any displays yet.")
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 48)
-    }
-
-    private func card(for screen: ScreenEntry) -> some View {
-        HStack(alignment: .top, spacing: 16) {
-            // Resolution is the most useful fact about a display at a glance,
-            // and it doubles as a shape hint for the card.
-            RoundedRectangle(cornerRadius: 8)
-                .fill(.quaternary)
-                .aspectRatio(
-                    CGFloat(screen.width) / CGFloat(max(screen.height, 1)),
-                    contentMode: .fit
-                )
-                .frame(width: 132)
-                .overlay {
-                    Text("\(screen.width)×\(screen.height)")
-                        .font(.system(size: 10, design: .monospaced))
-                        .foregroundStyle(.secondary)
-                }
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Screen \(screen.index + 1)")
-                    .font(.headline)
-                Text(screen.name)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 6) {
-                    if let title = screen.currentTitle {
-                        Text(title)
-                            .font(.callout)
-                            .fontWeight(.medium)
-                    } else {
-                        Text("No wallpaper set")
-                            .font(.callout)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .padding(.top, 2)
-
-                HStack(spacing: 10) {
-                    Button("Clear") { model.clearScreen(screen.index) }
-                        .disabled(screen.currentId == nil)
-
-                    Button("Use selected wallpaper") {
-                        model.applySelected(to: screen.index)
-                    }
-                    .disabled(model.selectedId == nil)
-                }
-                .controlSize(.small)
-                .padding(.top, 4)
-            }
-
-            Spacer(minLength: 0)
-        }
-        .padding(14)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color(nsColor: .controlBackgroundColor))
+        SectionHeader(
+            title: "Screens",
+            subtitle: model.screens.isEmpty
+                ? "No displays reported"
+                : "\(model.screens.count) display\(model.screens.count == 1 ? "" : "s") attached",
+            systemImage: "display"
         )
     }
 
+    private var empty: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "display.trianglebadge.exclamationmark")
+                .font(.system(size: 30, weight: .light))
+                .foregroundStyle(.tertiary)
+            Text("No screens detected")
+                .font(.callout.weight(.medium))
+            Text("The daemon has not reported any displays. Try `lively diagnostics`.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 44)
+    }
+
     private var applyToAll: some View {
-        HStack {
+        VStack(alignment: .leading, spacing: 8) {
+            SectionHeader(
+                title: "All screens",
+                subtitle: "One wallpaper everywhere",
+                systemImage: "rectangle.on.rectangle"
+            )
             Button {
                 model.applySelectedToAll()
             } label: {
-                Label("Apply selected wallpaper to all screens", systemImage: "rectangle.on.rectangle")
+                Label(
+                    model.selectedId == nil
+                        ? "Select a wallpaper first"
+                        : "Apply “\(model.selectedTitle)” to every screen",
+                    systemImage: "arrow.triangle.2.circlepath"
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .controlSize(.large)
             .disabled(model.selectedId == nil)
+            Text("Applies the wallpaper currently selected in the library.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(16)
+        .glassCard(cornerRadius: 16)
+    }
+
+    private var diagnosticsHint: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "info.circle")
+            Text("Run `lively diagnostics` to see what the backend supports on this machine.")
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+    }
+}
+
+/// One display, as a card.
+private struct ScreenCard: View {
+    @EnvironmentObject var model: AppModel
+    let screen: ScreenEntry
+
+    static let background = RoundedRectangle(cornerRadius: 12)
+        .fill(Color(nsColor: .controlBackgroundColor))
+
+    private var ratio: CGFloat {
+        CGFloat(screen.width) / CGFloat(max(screen.height, 1))
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top, spacing: 16) {
+                thumbnail
+                details
+                Spacer(minLength: 0)
+            }
+            .padding(16)
+
+            Divider().opacity(0.4)
+
+            actions
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+        }
+        .glassCard(cornerRadius: 16)
+    }
+
+    /// A rectangle at the display's real aspect ratio, filled with the current
+    /// wallpaper's thumbnail when there is one.
+    private var thumbnail: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 6)
+                .fill(.quaternary)
+                .aspectRatio(ratio, contentMode: .fit)
+                .frame(width: 116)
+                .overlay {
+                    Image(systemName: screen.currentId == nil ? "rectangle.slash" : "photo")
+                        .font(.system(size: 20, weight: .light))
+                        .foregroundStyle(.tertiary)
+                }
+        }
+    }
+
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("Screen \(screen.index + 1)")
+                .font(.callout.weight(.semibold))
+            Text(screen.name)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("\(screen.width) × \(screen.height)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.tertiary)
+
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(screen.currentId == nil ? Color.secondary.opacity(0.5) : Color.green)
+                    .frame(width: 6, height: 6)
+                Text(screen.currentTitle ?? "No wallpaper set")
+                    .font(.callout)
+                    .foregroundStyle(screen.currentId == nil ? .secondary : .primary)
+                    .lineLimit(1)
+            }
+            .padding(.top, 3)
+        }
+    }
+
+    private var actions: some View {
+        HStack(spacing: 8) {
+            Button("Use selected") { model.applySelected(to: screen.index) }
+                .disabled(model.selectedId == nil)
+            Button("Clear") { model.clearScreen(screen.index) }
+                .disabled(screen.currentId == nil)
             Spacer()
         }
-        .controlSize(.regular)
+        .controlSize(.small)
+        .buttonStyle(.borderless)
     }
 }
 
@@ -991,71 +1130,75 @@ struct ScreensView: View {
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
 
-    private var config: ConfigView? { model.config }
-
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 22) {
                 SectionHeader(
                     title: "Settings",
                     subtitle: "Applies to every wallpaper",
                     systemImage: "gearshape"
                 )
 
-                if let config {
-                    playbackSection(config)
-                    behaviourSection(config)
-                    layoutSection(config)
+                if let config = model.config {
+                    playback(config)
+                    audio(config)
+                    display(config)
+                    about
                 } else {
-                    Text("Loading settings…")
-                        .foregroundStyle(.secondary)
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading settings…").foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 30)
                 }
-
-                engineInfo
             }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: 560, alignment: .leading)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 24)
+            .frame(maxWidth: .infinity, alignment: .top)
         }
-        .frame(minWidth: 640, idealWidth: 700)
+        .frame(minWidth: 560, idealWidth: 640)
         .onAppear { model.reload() }
     }
 
-    private func playbackSection(_ config: ConfigView) -> some View {
-        settingsGroup("Playback", icon: "play.circle") {
-            Toggle("Pause during a fullscreen app", isOn: Binding(
-                get: { config.pauseOnFullscreen },
-                set: { model.setConfig("pauseOnFullscreen", $0) }
-            ))
-            Toggle("Pause on battery power", isOn: Binding(
-                get: { config.pauseOnBattery },
-                set: { model.setConfig("pauseOnBattery", $0) }
-            ))
-            Toggle("Audio visualiser", isOn: Binding(
-                get: { config.audioVisualizerEnabled },
-                set: { model.setConfig("audioVisualizerEnabled", $0) }
-            ))
+    private func playback(_ config: ConfigView) -> some View {
+        group("Playback", systemImage: "play.circle") {
+            toggle("Pause during a fullscreen app",
+                   value: config.pauseOnFullscreen,
+                   key: "pauseOnFullscreen")
+            toggle("Pause on battery power",
+                   value: config.pauseOnBattery,
+                   key: "pauseOnBattery")
+            toggle("Paused", value: config.isPaused, key: "isPaused")
         }
     }
 
-    private func behaviourSection(_ config: ConfigView) -> some View {
-        settingsGroup("Behaviour", icon: "wand.and.stars") {
-            Toggle("Muted", isOn: Binding(
-                get: { config.isMuted },
-                set: { model.setConfig("isMuted", $0) }
-            ))
-            Picker("Paused", selection: Binding(
-                get: { config.isPaused },
-                set: { model.setConfig("isPaused", $0) }
-            )) {
-                Text("Playing").tag(false)
-                Text("Paused").tag(true)
+    private func audio(_ config: ConfigView) -> some View {
+        group("Audio", systemImage: "speaker.wave.2") {
+            toggle("Muted", value: config.isMuted, key: "isMuted")
+            toggle("Audio visualiser",
+                   value: config.audioVisualizerEnabled,
+                   key: "audioVisualizerEnabled")
+            HStack {
+                Text("Volume")
+                Spacer()
+                Text("\(config.volumePercent)%")
+                    .font(.callout.monospacedDigit())
+                    .foregroundStyle(.secondary)
             }
-            .pickerStyle(.segmented)
+            CommitSlider(
+                key: "__volume",
+                value: Double(config.volumePercent),
+                range: 0...100,
+                step: 1,
+                onCommit: { model.setVolume($0) }
+            )
+            .controlSize(.small)
         }
     }
 
-    private func layoutSection(_ config: ConfigView) -> some View {
-        settingsGroup("Multi-display layout", icon: "rectangle.3.group") {
+    private func display(_ config: ConfigView) -> some View {
+        group("Displays", systemImage: "rectangle.3.group") {
             Picker("Layout", selection: Binding(
                 get: { config.layoutMode },
                 set: { model.setConfig("layoutMode", $0) }
@@ -1064,36 +1207,59 @@ struct SettingsView: View {
                 Text("Span all screens").tag(1)
                 Text("Duplicate").tag(2)
             }
-            Text("Only applies once more than one display is attached.")
+            .pickerStyle(.radioGroup)
+
+            Text("Only takes effect once more than one display is attached.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
     }
 
-    private var engineInfo: some View {
-        settingsGroup("Engine", icon: "info.circle") {
-            LabeledContent("Renderer", value: "macOS — Metal, WKWebView, AVFoundation")
-            LabeledContent("Build", value: Bundle.main.appVersion ?? "dev")
+    private var configPath: String { model.config?.path ?? "" }
+
+    private var about: some View {
+        group("About", systemImage: "info.circle") {
+            row("Version", Bundle.main.appVersion ?? "dev")
+            row("Renderers", "Image · Video · Web · URL · Shader")
+            row("Settings file", configPath)
         }
     }
 
-    private func settingsGroup<Content: View>(
+    // MARK: Building blocks
+
+    private func toggle(_ title: String, value: Bool, key: String) -> some View {
+        Toggle(title, isOn: Binding(
+            get: { value },
+            set: { model.setConfig(key, $0) }
+        ))
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label).foregroundStyle(.secondary)
+            Spacer(minLength: 12)
+            Text(value)
+                .font(.callout)
+                .multilineTextAlignment(.trailing)
+                .textSelection(.enabled)
+        }
+    }
+
+    private func group<Content: View>(
         _ title: String,
-        icon: String,
+        systemImage: String,
         @ViewBuilder content: () -> Content
     ) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label(title, systemImage: icon)
-                .font(.headline)
-            VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: systemImage)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 10) {
                 content()
             }
-            .padding(14)
+            .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 10)
-                    .fill(Color(nsColor: .controlBackgroundColor))
-            )
+            .glassCard(cornerRadius: 16)
         }
     }
 }
