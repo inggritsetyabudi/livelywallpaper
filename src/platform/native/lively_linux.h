@@ -27,6 +27,10 @@ int lively_event_fd(void);
  * pause for reasons the user cannot see. */
 bool lively_x11_any_fullscreen(void);
 
+/* malloc'd capability report; free with lively_diagnostics_free. */
+char *lively_diagnostics(void);
+void lively_diagnostics_free(char *text);
+
 void *lively_create_surface(int session, uint32_t screen_index);
 void lively_destroy_surface(void *handle);
 

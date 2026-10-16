@@ -44,7 +44,10 @@ typedef int gboolean;
 #endif
 
 #ifdef LIVELY_HAVE_WAYLAND
+#include <sys/mman.h>
+#include <unistd.h>
 #include <wayland-client.h>
+#include "wlr_layer_shell.h"
 #endif
 
 /* Mirrors `Session` in src/platform/linux.rs. */
@@ -67,6 +70,22 @@ typedef int gboolean;
 #define LIVELY_PLAYBACK_FAILED 5
 #define LIVELY_PLAYBACK_ENDED 6
 
+/* Per-surface Wayland state. Kept off to one side because nothing else in the
+ * file should have to know that Wayland has internals. */
+typedef struct {
+    struct wl_surface *surface;
+    struct zwlr_layer_surface_v1 *layer_surface;
+    struct wl_callback *frame_callback;
+    struct wl_shm_pool *pool;
+    void *pool_data;
+    size_t pool_size;
+    int pool_fd;
+    uint32_t width, height, stride;
+    /* Set once the compositor has told us a size. Nothing may be attached or
+     * committed before that, or the surface stays unconfigured forever. */
+    bool configured;
+} WaylandSurface;
+
 /*
  * The opaque record handed back to Rust as a pointer.
  *
@@ -87,6 +106,9 @@ typedef struct {
     double position;
     double duration;
     cairo_surface_t *image;
+#ifdef LIVELY_HAVE_WAYLAND
+    WaylandSurface *wl;
+#endif
     uint32_t width;
     uint32_t height;
     uint32_t stride;
@@ -117,9 +139,11 @@ static int g_xcb_screen_count = 0;
 #ifdef LIVELY_HAVE_WAYLAND
 static struct wl_display *g_wl_display = NULL;
 static struct wl_registry *g_wl_registry = NULL;
-static uint32_t g_wl_compositor = 0;
-static uint32_t g_wl_shm = 0;
+static struct wl_compositor *g_wl_compositor = NULL;
+static struct wl_shm *g_wl_shm = NULL;
+static struct zwlr_layer_shell_v1 *g_wl_layer_shell = NULL;
 static bool g_have_layer_shell = false;
+
 #endif
 
 /* A monitor's position and size, in root-window coordinates. */
@@ -128,9 +152,8 @@ typedef struct {
     uint16_t w, h;
 } MonitorRect;
 
-#ifdef LIVELY_HAVE_WAYLAND
-/* True when the environment actually advertises this session. Only the
- * Wayland connect path consults it. */
+/* True when the environment actually advertises this session. Consulted by the
+ * Wayland connect path and by the diagnostics report, so it is not guarded. */
 static bool session_is(int session) {
     if (session == LIVELY_SESSION_WAYLAND) {
         return getenv("WAYLAND_DISPLAY") != NULL;
@@ -140,7 +163,6 @@ static bool session_is(int session) {
     }
     return false;
 }
-#endif
 
 /* Forward declarations. The screen helpers below call these before they are
  * defined further down; without these the C compiler treats them as
@@ -257,6 +279,70 @@ uint32_t lively_screen_count(int session) {
  * Returns -1 when no display is reachable, which is also the signal to fall
  * back to a plain timed sleep.
  */
+/* One-line-per-fact capability report, for `lively diagnostics`.
+ *
+ * This exists because every failure mode here -- no layer-shell, no X
+ * authority, a compositor that closed the layer surface -- has a different
+ * remedy, and guessing from a silent failure wastes everyone's time. */
+void lively_diagnostics_free(char *text) { free(text); }
+
+char *lively_diagnostics(void) {
+    char *out = calloc(1, 8192);
+    if (!out) return NULL;
+    size_t n = 0;
+    #define DIAG(...) n += (size_t)snprintf(out + n, 8192 - n, __VA_ARGS__)
+
+    DIAG("session: %s\n",
+         session_is(LIVELY_SESSION_WAYLAND) ? "wayland"
+         : session_is(LIVELY_SESSION_X11) ? "x11"
+                                           : "none");
+
+    if (session_is(LIVELY_SESSION_X11)) {
+        DIAG("x11: %s\n", lively_x11_connect() ? "connected" : "unreachable");
+        if (g_xcb) {
+            DIAG("displays: %u\n", monitor_count());
+            for (uint32_t i = 0; i < monitor_count(); i++) {
+                MonitorRect r;
+                if (monitor_rect(i, &r))
+                    DIAG("  display %u: %ux%u at %d,%d\n", i, r.w, r.h, r.x, r.y);
+            }
+        }
+        DIAG("fullscreen: %s\n", lively_x11_any_fullscreen() ? "yes" : "no");
+    }
+
+#ifdef LIVELY_HAVE_WAYLAND
+    if (session_is(LIVELY_SESSION_WAYLAND)) {
+        const bool ok = lively_wayland_connect();
+        DIAG("wayland: %s\n", ok ? "connected" : "unreachable");
+        DIAG("wl_compositor: %s\n", g_wl_compositor ? "yes" : "no");
+        DIAG("wl_shm: %s\n", g_wl_shm ? "yes" : "no");
+        DIAG("zwlr_layer_shell_v1: %s\n",
+             g_wl_layer_shell ? "yes" : "no (GNOME/Mutter do not implement it)");
+        DIAG("wl_output enumeration: not implemented; one surface spans all outputs\n");
+    }
+#else
+    if (session_is(LIVELY_SESSION_WAYLAND))
+        DIAG("wayland: built without the linux-wayland feature\n");
+#endif
+
+    DIAG("renderers:\n");
+    DIAG("  image  : %s\n", "yes");
+#ifdef LIVELY_HAVE_VIDEO
+    DIAG("  video  : %s\n", "yes (GStreamer)");
+#else
+    DIAG("  video  : no (build with --features linux-video)\n");
+#endif
+#ifdef LIVELY_HAVE_WEB
+    DIAG("  web    : %s\n", "yes (WebKitGTK)");
+#else
+    DIAG("  web    : no (build with --features linux-web)\n");
+#endif
+    DIAG("  shader : no (not implemented on Linux)\n");
+    DIAG("on battery: %s\n", "unknown to the shim");
+    #undef DIAG
+    return out;
+}
+
 int lively_event_fd(void) {
     if (lively_x11_connect()) {
         return xcb_get_file_descriptor(g_xcb);
@@ -530,12 +616,23 @@ static void wl_registry_global(void *data, struct wl_registry *registry,
                                uint32_t name, const char *interface,
                                uint32_t version) {
     if (strcmp(interface, "wl_compositor") == 0) {
-        g_wl_compositor = name;
+        if (version >= 4) {
+            g_wl_compositor = wl_registry_bind(registry, name, &wl_compositor_interface,
+                                              (version < 4) ? version : 4);
+        }
     } else if (strcmp(interface, "wl_shm") == 0) {
-        g_wl_shm = name;
+        if (version >= 1) {
+            g_wl_shm = wl_registry_bind(registry, name, &wl_shm_interface,
+                                        (version < 1) ? version : 1);
+        }
     } else if (strcmp(interface, "zwlr_layer_shell_v1") == 0) {
-        /* Present: this compositor can host a wallpaper surface. */
-        g_have_layer_shell = true;
+        /* Bind it. The previous code only recorded that the global existed,
+         * which is why nothing was ever shown. */
+        if (version >= 4) {
+            g_wl_layer_shell = wl_registry_bind(registry, name, &zwlr_layer_shell_v1_interface,
+                                                4);
+            g_have_layer_shell = g_wl_layer_shell != NULL;
+        }
     }
 }
 
@@ -545,6 +642,231 @@ static const struct wl_registry_listener g_registry_listener = {
     .global = wl_registry_global,
     .global_remove = wl_registry_remove,
 };
+
+
+/*
+ * A frame has been presented. Re-arm the callback so the compositor keeps
+ * telling us when it is ready for the next one -- this is the clock the
+ * renderer paces itself against, rather than a wall-clock timer.
+ */
+static void wl_frame_done(void *data, struct wl_callback *cb, uint32_t time) {
+    WaylandSurface *ws = data;
+    (void)time;
+    if (cb) wl_callback_destroy(cb);
+    ws->frame_callback = NULL;
+}
+
+/*
+ * The compositor assigned a size.
+ *
+ * Nothing may be committed before this arrives, and the serial must be handed
+ * back or the surface never becomes configured. A wallpaper that ignores this
+ * is invisible -- which is not an error the compositor bothers to report.
+ */
+static void wl_layer_configure(void *data, struct zwlr_layer_surface_v1 *surface,
+                               uint32_t serial, uint32_t width, uint32_t height) {
+    WaylandSurface *ws = data;
+    ws->configured = true;
+    if (width > 0) ws->width = width;
+    if (height > 0) ws->height = height;
+    zwlr_layer_surface_v1_ack_configure(surface, serial);
+    if (ws->surface) wl_surface_commit(ws->surface);
+}
+
+static void wl_layer_closed(void *data, struct zwlr_layer_surface_v1 *surface) {
+    (void)surface;
+    fprintf(stderr,
+            "[Lively] the compositor closed the wallpaper layer surface "
+            "(another program may own this layer, or a workspace switch "
+            "reclaimed it). Wallpaper will not be shown on this session.\n");
+    /* Deliberately does not crash or spin: a lost surface must not take the
+     * daemon down, and re-creating it in a loop would fight the compositor. */
+}
+
+static void wl_layer_error(void *data, struct zwlr_layer_shell_v1 *shell, uint32_t code,
+                           const char *message, void *id) {
+    (void)shell;
+    (void)id;
+    fprintf(stderr, "[Lively] wlr-layer-shell error %u: %s\n", code,
+            message ? message : "(no message)");
+}
+
+/*
+ * Creates a wallpaper surface: a plain wl_surface turned into a
+ * zwlr_layer_surface_v1 on the bottom layer, anchored to every edge.
+ *
+ * Bottom layer is the only place a wallpaper belongs. "Background" is the same
+ * place, but some compositors reserve it and prefer it be left alone.
+ *
+ * A NULL output means "every output", which covers the whole logical desktop
+ * with one surface. Per-output surfaces need wl_output enumeration and are a
+ * separate step.
+ */
+static WaylandSurface *wl_create_wallpaper_surface(uint32_t width, uint32_t height) {
+    if (!g_wl_compositor || !g_wl_layer_shell) {
+        fprintf(stderr,
+                "[Lively] wl_compositor or wlr-layer-shell unavailable; cannot "
+                "create a wallpaper surface.\n");
+        return NULL;
+    }
+
+    WaylandSurface *ws = calloc(1, sizeof(WaylandSurface));
+    if (!ws) return NULL;
+    ws->width = width ? width : 1920;
+    ws->height = height ? height : 1080;
+
+    ws->surface = wl_compositor_create_surface(g_wl_compositor);
+    if (!ws->surface) {
+        free(ws);
+        return NULL;
+    }
+
+    ws->layer_surface = zwlr_layer_shell_v1_get_layer_surface(
+        g_wl_layer_shell, ws->surface, NULL, ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM,
+        "lively-wallpaper");
+    if (!ws->layer_surface) {
+        wl_surface_destroy(ws->surface);
+        free(ws);
+        return NULL;
+    }
+
+    static struct zwlr_layer_surface_v1_listener listener;
+    listener.configure = wl_layer_configure;
+    listener.closed = wl_layer_closed;
+    zwlr_layer_surface_v1_add_listener(ws->layer_surface, &listener, ws);
+
+    static struct zwlr_layer_shell_v1_listener shell_listener;
+    shell_listener.error = wl_layer_error;
+    zwlr_layer_shell_v1_add_listener(g_wl_layer_shell, &shell_listener, NULL);
+
+    zwlr_layer_surface_v1_set_size(ws->layer_surface, ws->width, ws->height);
+    zwlr_layer_surface_v1_set_anchor(
+        ws->layer_surface,
+        ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP | ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM |
+            ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT | ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT);
+    /* -1 means "take as much room as needed, but do not reserve any": the
+     * surface spans the output without pushing panels or docks around. */
+    zwlr_layer_surface_v1_set_exclusive_zone(ws->layer_surface, -1);
+    /* One: the surface never takes keyboard focus. A wallpaper that can hold
+     * focus will, at some point, swallow the user's first keystroke. */
+    zwlr_layer_surface_v1_set_keyboard_interactivity(ws->layer_surface, 1);
+
+    /* Initial commit carries the requests above and asks for the first
+     * configure. Nothing can be drawn until that comes back. */
+    wl_surface_commit(ws->surface);
+    wl_display_flush(g_wl_display);
+
+    return ws;
+}
+
+/*
+ * Makes sure a shared-memory pool exists and is large enough, reallocating
+ * when the compositor changed the surface size.
+ *
+ * The pool is memfd-backed so it never touches the filesystem, which matters
+ * for a wallpaper that should have no side effects on disk.
+ */
+static bool wl_ensure_pool(WaylandSurface *ws) {
+    const uint32_t bpp = 4;
+    ws->stride = ws->width * bpp;
+    size_t need = (size_t)ws->stride * ws->height;
+    need = (need + 4095) & ~((size_t)4095); /* page-align, as Wayland expects */
+
+    if (ws->pool && need <= ws->pool_size) return true;
+
+    if (ws->pool) {
+        wl_shm_pool_destroy(ws->pool);
+        ws->pool = NULL;
+    }
+    if (ws->pool_data) {
+        munmap(ws->pool_data, ws->pool_size);
+        ws->pool_data = NULL;
+    }
+    if (ws->pool_fd > 0) {
+        close(ws->pool_fd);
+        ws->pool_fd = -1;
+    }
+
+    ws->pool_fd = memfd_create("lively-wallpaper", MFD_CLOEXEC);
+    if (ws->pool_fd < 0) return false;
+    if (ftruncate(ws->pool_fd, (off_t)need) != 0) return false;
+
+    ws->pool_data = mmap(NULL, need, PROT_READ | PROT_WRITE, MAP_SHARED, ws->pool_fd, 0);
+    if (ws->pool_data == MAP_FAILED) {
+        ws->pool_data = NULL;
+        return false;
+    }
+    ws->pool_size = need;
+    ws->pool = wl_shm_create_pool(g_wl_shm, ws->pool_fd, (int32_t)need);
+    return ws->pool != NULL;
+}
+
+/*
+ * Attaches a Cairo image to the surface and presents it.
+ *
+ * Cairo's ARGB32 is premultiplied BGRA in memory on a little-endian machine,
+ * which is byte-for-byte what WL_SHM_FORMAT_ARGB8888 expects, so the pixels
+ * are copied straight across with no conversion.
+ */
+static bool wl_present_image(WaylandSurface *ws, cairo_surface_t *image) {
+    if (!ws || !ws->surface || !image || !ws->configured) return false;
+    if (!g_wl_shm) return false;
+
+    const int w = cairo_image_surface_get_width(image);
+    const int h = cairo_image_surface_get_height(image);
+    if (w <= 0 || h <= 0) return false;
+
+    /* Match the buffer to the image rather than the surface: the compositor
+     * may have assigned a different size, and stretching happens in Cairo
+     * before this point. */
+    ws->width = (uint32_t)w;
+    ws->height = (uint32_t)h;
+    if (!wl_ensure_pool(ws)) return false;
+
+    struct wl_buffer *buffer = wl_shm_pool_create_buffer(
+        ws->pool, 0, ws->width, ws->height, (int32_t)ws->stride,
+        WL_SHM_FORMAT_ARGB8888);
+    if (!buffer) return false;
+
+    memcpy(ws->pool_data, cairo_image_surface_get_data(image), ws->pool_size < (size_t)ws->stride * ws->height
+                                                  ? ws->pool_size
+                                                  : (size_t)ws->stride * ws->height);
+
+    wl_surface_attach(ws->surface, buffer, 0, 0);
+    wl_surface_damage_buffer(ws->surface, 0, 0, (int32_t)ws->width, (int32_t)ws->height);
+
+    /* Ask to be told when the frame is on screen. Reusing the previous
+     * callback without destroying it leaks one proxy per frame. */
+    if (ws->frame_callback) {
+        wl_callback_destroy(ws->frame_callback);
+        ws->frame_callback = NULL;
+    }
+    ws->frame_callback = wl_surface_frame(ws->surface);
+    if (ws->frame_callback) {
+        static struct wl_callback_listener cb_listener;
+        cb_listener.done = wl_frame_done;
+        wl_callback_add_listener(ws->frame_callback, &cb_listener, ws);
+    }
+
+    wl_surface_commit(ws->surface);
+    wl_display_flush(g_wl_display);
+
+    /* The buffer is owned by the compositor once committed; destroying our
+     * handle is correct and lets it free the underlying pool slot. */
+    wl_buffer_destroy(buffer);
+    return true;
+}
+
+static void wl_destroy_wallpaper_surface(WaylandSurface *ws) {
+    if (!ws) return;
+    if (ws->frame_callback) wl_callback_destroy(ws->frame_callback);
+    if (ws->layer_surface) zwlr_layer_surface_v1_destroy(ws->layer_surface);
+    if (ws->surface) wl_surface_destroy(ws->surface);
+    if (ws->pool) wl_shm_pool_destroy(ws->pool);
+    if (ws->pool_data) munmap(ws->pool_data, ws->pool_size);
+    if (ws->pool_fd > 0) close(ws->pool_fd);
+    free(ws);
+}
 
 static bool lively_wayland_connect(void) {
     if (g_wl_display) return true;
@@ -681,8 +1003,14 @@ void *lively_create_surface(int session, uint32_t screen_index) {
             free(surface);
             return NULL;
         }
-        /* The layer-surface itself is created once the window is configured;
-         * for now the record is all the Rust side needs. */
+        /* Actually create it. The previous code stopped at "is layer-shell
+         * available" and returned a record with no surface behind it, which
+         * meant the Wayland path could never have shown anything. */
+        surface->wl = wl_create_wallpaper_surface(1920, 1080);
+        if (!surface->wl) {
+            free(surface);
+            return NULL;
+        }
 #else
         free(surface);
         return NULL;
@@ -695,6 +1023,13 @@ void *lively_create_surface(int session, uint32_t screen_index) {
 void lively_destroy_surface(void *handle) {
     if (!handle) return;
     LivelySurface *surface = (LivelySurface *)handle;
+
+#ifdef LIVELY_HAVE_WAYLAND
+    if (surface->wl) {
+        wl_destroy_wallpaper_surface(surface->wl);
+        surface->wl = NULL;
+    }
+#endif
 
 #ifdef LIVELY_HAVE_VIDEO
     /* Stop the pipeline before anything else: it holds the appsink callback,
@@ -794,6 +1129,15 @@ static int draw_image(LivelySurface *surface, const char *path) {
                       stride, cairo_image_surface_get_data(target));
         xcb_flush(g_xcb);
     }
+
+#ifdef LIVELY_HAVE_WAYLAND
+    /* X11 uploads through put_image; Wayland hands the same Cairo pixels to a
+     * wl_shm buffer. Both consume `target`, so the teardown below is shared. */
+    if (surface->session == LIVELY_SESSION_WAYLAND && surface->wl) {
+        wl_display_roundtrip(g_wl_display); /* deliver configure, if pending */
+        wl_present_image(surface->wl, target);
+    }
+#endif
 
     cairo_surface_destroy(image);
     cairo_surface_destroy(target);

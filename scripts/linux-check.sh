@@ -63,6 +63,8 @@ export CC_"${TARGET//-/_}"="$CC"
 export CFLAGS_"${TARGET//-/_}"="--sysroot=$SYSROOT -I$SYSROOT/usr/include -I$SYSROOT/usr/include/xcb"
 export RUSTFLAGS="-C link-arg=--sysroot=$SYSROOT \
     -C link-arg=-L$LIBDIR \
+    -C link-arg=-L$SYSROOT/usr/lib \
+    -C link-arg=-L$SYSROOT/usr/lib64 \
     -C link-arg=-Wl,-rpath-link,$LIBDIR \
     -C link-arg=-Wl,--allow-shlib-undefined"
 CC_FLAGS=(--sysroot="$SYSROOT" "-I$SYSROOT/usr/include" "-I$SYSROOT/usr/include/xcb"
@@ -91,6 +93,11 @@ compile_c "x11 + wayland"      -DLIVELY_HAVE_WAYLAND || rc=1
 compile_c "x11 only"                          || rc=1
 compile_c "no media stack"      -DLIVELY_HAVE_WAYLAND || rc=1
 [ $rc -ne 0 ] && exit 1
+
+# `cc` only re-runs when build.rs is newer than its output. Editing the C shim
+# without touching build.rs leaves a stale object linked in, which shows up as a
+# baffling "undefined reference" to a function that is plainly in the source.
+touch build.rs
 
 echo "==> cargo check --target $TARGET"
 if ! cargo check --target "$TARGET"; then

@@ -26,7 +26,7 @@ by window system, and one common desktop is genuinely not supported.
 |---|---|---|---|---|---|---|
 | **macOS** | **verified** | AVFoundation | WKWebView | NSImage | Metal | SwiftUI |
 | **X11** | builds, unrun | GStreamer | WebKitGTK | Cairo | not implemented | CLI only |
-| **Wayland** (layer-shell) | *unbuilt* | GStreamer | X11 only | Cairo | not implemented | CLI only |
+| **Wayland** (layer-shell) | builds, unrun | GStreamer | X11 only | Cairo | not implemented | CLI only |
 | **GNOME / Mutter** | **not supported** | — | — | — | — | — |
 
 Image and video are intended to render straight into the wallpaper surface.
@@ -122,12 +122,36 @@ Beyond the unverified-status caveat above, these are gaps by construction:
 
 - The shader renderer is not implemented on Linux.
 - There is no Linux GUI — CLI only. `lively show-app` reports this.
-- The Wayland path detects `zwlr_layer_shell_v1` through the registry but does
-  not yet create a `wl_surface`.
+- Wayland creates one surface spanning all outputs. Per-output surfaces need
+  `wl_output` enumeration, which is Phase C.
+- The layer-shell protocol bindings are hand-written
+  (`src/platform/native/wlr_layer_shell.h`) because `wayland-scanner` cannot run
+  on a macOS build host. They cover only what the backend uses.
 - The screensaver is macOS-only; `lively screensaver` says so.
 - Wayland fullscreen detection always answers "no". Wayland deliberately keeps
   `_NET_ACTIVE_WINDOW` private, so there is no honest answer, and guessing
   "yes" would pause wallpapers for no visible reason.
+
+## Testing on a real machine
+
+```console
+$ cargo build --release --features linux-video,linux-web
+$ ./target/release/livelywallpaper diagnostics
+```
+
+`diagnostics` prints the session type, which globals the compositor offered,
+the detected displays with their geometry, and which renderers are compiled in.
+It opens no surface and changes no state, so it is safe to run on a machine
+where nothing works. Paste its output into a bug report.
+
+What to try, in order:
+
+1. `lively diagnostics` — confirm `zwlr_layer_shell_v1: yes`. If it says no,
+   the compositor cannot host a wallpaper surface; on GNOME that is expected
+   and not a bug.
+2. `lively screens` — expect one entry per monitor under X11.
+3. `lively set <image>` — look behind other windows.
+4. `lively daemon` in a terminal and watch for errors.
 
 ## What was fixed to get here
 

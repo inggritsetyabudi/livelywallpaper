@@ -70,6 +70,12 @@ enum Commands {
         #[arg(short, long, default_value_t = 0)]
         monitor: u32,
     },
+    /// Print a capability report for bug reports
+    ///
+    /// Safe to run anywhere: it opens no surface, changes no state, and does
+    /// not need a working wallpaper backend.
+    Diagnostics,
+
     /// Remove the wallpaper from a screen (leaves the screen usable)
     Close {
         /// Screen index, or -1 for every screen
@@ -266,6 +272,7 @@ fn run(cli: Cli) -> Result<()> {
     // Commands that never need a daemon: handle locally and exit.
     match &command {
         Commands::Screens => return print_screens(),
+        Commands::Diagnostics => return print_diagnostics(),
         Commands::ListLibrary => return print_library(),
         Commands::AddLibrary { path } => return add_to_library(path),
         Commands::RemoveLibrary { id } => return remove_from_library(id),
@@ -504,6 +511,7 @@ fn to_ipc_command(command: &Commands) -> ipc::IpcCommand {
         // Handled locally before we ever get here. Mapped to a harmless command
         // so the match stays total without pretending it does something.
         Commands::Screens
+        | Commands::Diagnostics
         | Commands::ListLibrary
         | Commands::AddLibrary { .. }
         | Commands::RemoveLibrary { .. } => ipc::IpcCommand::ShowApp,
@@ -576,6 +584,11 @@ fn print_screens() -> Result<()> {
         let (name, w, h) = platform::screen_info(i);
         println!("{:<4} {:<24} {:>10} x {:<10}", i, name, w, h);
     }
+    Ok(())
+}
+
+fn print_diagnostics() -> Result<()> {
+    println!("{}", platform::diagnostics().trim_end());
     Ok(())
 }
 

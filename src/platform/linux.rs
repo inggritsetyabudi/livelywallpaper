@@ -390,6 +390,10 @@ impl Platform for LinuxPlatform {
         battery_is_discharging()
     }
 
+    fn diagnostics() -> String {
+        crate::platform::linux_sys::diagnostics()
+    }
+
     fn present_ui() -> Result<()> {
         Err(Error::Invalid(
             "the graphical settings window is macOS-only in this build. Use the CLI: \

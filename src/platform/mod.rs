@@ -250,6 +250,11 @@ pub trait Platform: Sized {
     fn on_battery_power() -> bool {
         false
     }
+
+    /// A capability report, one fact per line, for bug reports.
+    fn diagnostics() -> String {
+        String::new()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -311,4 +316,12 @@ pub fn any_app_fullscreen() -> bool {
 
 pub fn on_battery_power() -> bool {
     ActivePlatform::on_battery_power()
+}
+
+/// A capability report for bug reports.
+///
+/// Defaults to the macOS answer so the command works on both platforms rather
+/// than erroring where it was never implemented.
+pub fn diagnostics() -> String {
+    ActivePlatform::diagnostics()
 }

@@ -26,7 +26,9 @@ The project has not been released. Everything below exists on `master`.
 - **Wallpaper restore at login**, backed by a LaunchAgent.
 - **UI self-test** running through the real Swift → Rust → Swift path.
 - **Memory soak script** (`scripts/leak-check.sh`).
-- **Linux backend** — experimental, unbuilt. See `docs/linux.md`.
+- **Linux backend** — compiles and links; creates a real X11 desktop window
+  and a real Wayland layer-shell surface. Never executed. See `docs/linux.md`.
+- **`lively diagnostics`** — capability report for bug reports.
 - **CI** for macOS 14 and an Ubuntu 24.04 feature matrix. The Linux job has
   never been observed green.
 

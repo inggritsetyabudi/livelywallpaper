@@ -66,6 +66,8 @@ extern "C" {
     /// to say.
     fn lively_event_fd() -> c_int;
     fn lively_x11_any_fullscreen() -> bool;
+    fn lively_diagnostics() -> *mut std::ffi::c_char;
+    fn lively_diagnostics_free(text: *mut std::ffi::c_char);
 }
 
 pub fn session_code(session: Session) -> c_int {
@@ -221,6 +223,26 @@ pub fn x11_any_fullscreen() -> bool {
     // SAFETY: no arguments, no ownership transfer; the shim only reads EWMH
     // properties off the cached connection.
     unsafe { lively_x11_any_fullscreen() }
+}
+
+/// A capability report, one fact per line.
+///
+/// Exists so someone testing on real hardware can hand over something useful
+/// instead of "it does not work" -- the session type, which globals the
+/// compositor offered, the detected displays, and which renderers are compiled
+/// in each have different fixes.
+pub fn diagnostics() -> String {
+    // SAFETY: the shim returns a malloc'd NUL-terminated string, or NULL on
+    // allocation failure. Copied out and released immediately.
+    unsafe {
+        let ptr = lively_diagnostics();
+        if ptr.is_null() {
+            return "could not allocate a diagnostics report".into();
+        }
+        let text = std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned();
+        lively_diagnostics_free(ptr);
+        text
+    }
 }
 
 /// The display fd to block on, or `None` when there is no display server.

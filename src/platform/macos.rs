@@ -224,6 +224,32 @@ impl Platform for MacPlatform {
         }
     }
 
+    fn diagnostics() -> String {
+        let mut out = String::new();
+        out.push_str("platform: macOS\n");
+        out.push_str(&format!("version: {}\n", env!("CARGO_PKG_VERSION")));
+        out.push_str(&format!("screens: {}\n", Self::screen_count()));
+        for i in 0..Self::screen_count() {
+            let (name, w, h) = Self::screen_info(i);
+            out.push_str(&format!("  {i}: {name} {w}x{h}\n"));
+        }
+        out.push_str("renderers:\n");
+        out.push_str("  image  : yes (NSImage)\n");
+        out.push_str("  video  : yes (AVFoundation)\n");
+        out.push_str("  web    : yes (WKWebView)\n");
+        out.push_str("  url    : yes (WKWebView)\n");
+        out.push_str("  shader : yes (Metal)\n");
+        out.push_str(&format!(
+            "battery: {}\n",
+            if Self::on_battery_power() {
+                "yes"
+            } else {
+                "no"
+            }
+        ));
+        out
+    }
+
     fn present_ui() -> Result<()> {
         // SAFETY: dispatches to the main queue internally.
         unsafe { ffi::lively_ui_present() };
