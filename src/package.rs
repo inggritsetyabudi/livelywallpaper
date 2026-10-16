@@ -91,6 +91,30 @@ impl LivelyInfo {
     /// Returns `None` when the file is absent — most packages have none — and
     /// also when it is present but unparseable: a broken settings file must not
     /// stop the wallpaper itself from loading.
+    /// Writes one property's current value back to `LivelyProperties.json`.
+    ///
+    /// Without this a slider appears to do nothing: the engine delivers the
+    /// value to the wallpaper, then the next state read re-parses the file and
+    /// reports the original default, so the thumb snaps straight back.
+    pub fn save_property(&self, name: &str, value: &PropertyValue) -> crate::error::Result<()> {
+        let Some(mut props) = self.load_properties() else {
+            return Err(crate::error::Error::Invalid(
+                "this wallpaper has no LivelyProperties.json".into(),
+            ));
+        };
+        let Some(entry) = props.get_mut(name) else {
+            return Err(crate::error::Error::Invalid(format!(
+                "no property named `{name}`"
+            )));
+        };
+        entry.value = Some(value.clone());
+
+        let path = self.root_folder.join("LivelyProperties.json");
+        let json = serde_json::to_string_pretty(&props)
+            .map_err(|e| crate::error::Error::Invalid(e.to_string()))?;
+        std::fs::write(&path, json).map_err(|e| crate::error::Error::io(&path, e))
+    }
+
     pub fn load_properties(&self) -> Option<LivelyProperties> {
         let prop_path = self.root_folder.join("LivelyProperties.json");
         if !prop_path.exists() {

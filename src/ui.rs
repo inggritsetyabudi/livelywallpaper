@@ -469,6 +469,27 @@ fn dispatch(request: &UiRequest, state: &AppState) -> Result<Option<PlaybackView
                 .unwrap_or_default();
             let screen = request.screen.unwrap_or(0);
             state.with_engine(|e| e.set_property(screen, name, &value))?;
+
+            // Persist alongside the live update. The engine hands the value to
+            // the wallpaper, but the next state read re-parses
+            // LivelyProperties.json -- so without this the control reports the
+            // original default again and looks like it did nothing.
+            if let Some(id) = request.id.as_deref() {
+                let library = LibraryManager::new()?;
+                if let Some(item) = library.find(id) {
+                    if let Ok(info) = crate::package::LivelyInfo::load_from_dir(&item.path) {
+                        let parsed = match value.as_str() {
+                            "true" => crate::package::PropertyValue::Bool(true),
+                            "false" => crate::package::PropertyValue::Bool(false),
+                            other => match other.parse::<f64>() {
+                                Ok(n) => crate::package::PropertyValue::Number(n),
+                                Err(_) => crate::package::PropertyValue::String(other.to_string()),
+                            },
+                        };
+                        info.save_property(name, &parsed)?;
+                    }
+                }
+            }
         }
 
         other => {

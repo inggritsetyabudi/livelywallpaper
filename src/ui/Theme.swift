@@ -103,49 +103,44 @@ struct AuroraBackdrop: View {
 
 // MARK: - Glass
 
-/// The Liquid Glass material, or the nearest thing to it on older systems.
-///
-/// The real APIs exist from macOS 26. Rather than scatter `if #available`
-/// through every view, they are concentrated here: on macOS 26 and newer this
-/// is genuine Liquid Glass; below that it degrades to a material that reads
-/// similarly enough to still look intentional.
-///
-/// This returns *only the background shape*. It must be used through
-/// `.background { }`, never applied to the content directly -- returning it
-/// as a plain view silently discards whatever it was chained onto.
-@ViewBuilder
-func glassBackdrop(_ shape: some Shape, tint: Color?, interactive: Bool) -> some View {
-    if #available(macOS 26.0, *) {
-        // `.interactive()` makes the glass react to pointer and keyboard focus.
-        let effect = interactive ? Glass.regular.interactive() : Glass.regular
-        let glass = shape.fill(.clear).glassEffect(effect, in: shape)
-        if let tint {
-            glass.overlay(shape.fill(tint.opacity(0.18)))
-        } else {
-            glass
-        }
-    } else {
-        let base = shape.fill(.ultraThinMaterial)
-        if let tint {
-            base.overlay(shape.fill(tint.opacity(0.12)))
-        } else {
-            base
-        }
-    }
-}
 
 extension View {
+    /// The Liquid Glass material, or the nearest thing to it on older systems.
+    ///
+    /// The real APIs exist from macOS 26. This app still supports macOS 14, so
+    /// the availability check lives here rather than in every view: genuine
+    /// Liquid Glass above macOS 26, a near-enough material below it.
+    ///
+    /// This is *only the background shape*. It has to be used through
+    /// `.background { }`; applying it to content directly would discard it.
+    @ViewBuilder
+    private func glassBackdrop(_ shape: some Shape, tint: Color?) -> some View {
+        if #available(macOS 26.0, *) {
+            let glass = shape.fill(.clear).glassEffect(.regular, in: shape)
+            if let tint {
+                glass.overlay(shape.fill(tint.opacity(0.18)))
+            } else {
+                glass
+            }
+        } else {
+            let base = shape.fill(.ultraThinMaterial)
+            if let tint {
+                base.overlay(shape.fill(tint.opacity(0.12)))
+            } else {
+                base
+            }
+        }
+    }
+
     /// Liquid Glass behind this view, on a rounded rectangle.
     func glassCard(
         cornerRadius: CGFloat = 14,
-        tint: Color? = nil,
-        interactive: Bool = false
+        tint: Color? = nil
     ) -> some View {
         background {
             glassBackdrop(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous),
-                tint: tint,
-                interactive: interactive
+                tint: tint
             )
         }
     }
@@ -223,38 +218,7 @@ struct GlassPanel<Content: View>: View {
     }
 }
 
-/// A small caption that sits above a panel or a group of controls.
-struct Eyebrow: View {
-    let title: String
-    var systemImage: String?
-    var tint: Color = GoldenGate.deep
-
-    var body: some View {
-        HStack(spacing: 5) {
-            if let systemImage {
-                Image(systemName: systemImage)
-            }
-            Text(title.uppercased())
-                .tracking(0.6)
-        }
-        .font(.system(size: 10, weight: .semibold))
-        .foregroundStyle(tint)
-    }
-}
-
 // MARK: - Motion
-
-extension AnyView {
-    /// The app's standard response to a value changing.
-    func livelyChange() -> AnyView {
-        AnyView(
-            self.animation(
-                .spring(response: 0.34, dampingFraction: 0.82),
-                value: UUID()
-            )
-        )
-    }
-}
 
 enum LivelyMotion {
     /// Panels settling in.

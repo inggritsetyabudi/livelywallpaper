@@ -5,9 +5,11 @@ All notable changes to this project are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.2.0] - 2026-10-16
 
-The project has not been released. Everything below exists on `master`.
+The first tagged release. macOS is verified end to end; the Linux backend
+compiles and links but has never been run, which is why this is 0.2.0 and not
+1.0.0.
 
 ### Added
 

@@ -80,18 +80,6 @@ extension LibraryEntry {
         }
     }
 
-    var kindBadge: String {
-        switch wallpaperType {
-        case 0: "Video"
-        case 1, 2: "Web"
-        case 3: "App"
-        case 4: "GIF"
-        case 5: "Image"
-        case 6: "Shader"
-        default: "Unknown"
-        }
-    }
-
     var symbol: String {
         switch wallpaperType {
         case 0: "film"
@@ -302,10 +290,6 @@ final class AppModel: NSObject, ObservableObject {
     /// SwiftUI macro plugin `@State` needs, and it is the one property wrapper
     /// the rest of this UI has never had to use.
     @Published var sliderDrafts: [String: Double] = [:]
-
-    func beginDraft(_ key: String) {
-        // No-op: presence is what matters. Kept for readability at call sites.
-    }
 
     func draft(_ key: String, fallback: Double) -> Double {
         sliderDrafts[key] ?? fallback
@@ -569,6 +553,23 @@ reload()
     /// Loads the library page, or whichever screen the user was last on.
     func go(_ target: SidebarPage) {
         section = target
+    }
+
+    /// Whether the current selection is a web wallpaper. The daemon only
+    /// delivers properties to web renderers, so the panel uses this to avoid
+    /// showing controls that cannot work.
+    var isWebWallpaper: Bool {
+        guard let id = selectedId,
+              let entry = library.first(where: { $0.id == id })
+        else { return false }
+        return entry.wallpaperType == 1 || entry.wallpaperType == 2
+    }
+
+    var selectedTypeName: String {
+        guard let id = selectedId,
+              let entry = library.first(where: { $0.id == id })
+        else { return "selected" }
+        return entry.typeLabel.lowercased()
     }
 
     func clearScreen(_ index: UInt32) {

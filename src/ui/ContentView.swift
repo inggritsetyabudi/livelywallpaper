@@ -151,11 +151,13 @@ struct ContentView: View {
             }
         )
         .overlay(alignment: .leading) {
+            // Outside the row's content, not on top of the icon. The row
+            // reserves the inset itself so the glyphs stay aligned.
             if active {
                 Capsule()
                     .fill(GoldenGate.tint)
-                    .frame(width: 3, height: 18)
-                    .padding(.leading, 6)
+                    .frame(width: 3, height: 16)
+                    .padding(.leading, 3)
             }
         }
         .foregroundStyle(active ? GoldenGate.tint : .primary)
@@ -478,7 +480,7 @@ struct WallpaperCard: View {
             } else {
                 VStack(spacing: 5) {
                     Image(systemName: entry.symbol).font(.system(size: 22, weight: .light))
-                    Text(entry.kindBadge).font(.caption2.weight(.medium))
+                    Text(entry.typeLabel).font(.caption2.weight(.medium))
                 }
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -523,7 +525,7 @@ struct DetailsPane: View {
 
                 if !model.properties.isEmpty {
                     Divider()
-                    PropertiesPane(properties: model.properties)
+                    PropertiesPane(properties: model.properties, propertiesOnlyWeb: true)
                 }
             }
             .padding(18)
@@ -720,6 +722,7 @@ struct MetadataRow: View {
 struct PropertiesPane: View {
     @EnvironmentObject var model: AppModel
     let properties: [PropertyEntry]
+    var propertiesOnlyWeb: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -729,6 +732,16 @@ struct PropertiesPane: View {
 
             ForEach(properties) { property in
                 PropertyRow(property: property)
+            }
+
+            // Properties are only implemented for web wallpapers. A slider
+            // the engine will reject is worse than no slider, so the panel
+            // says so rather than offering a control that cannot work.
+            if propertiesOnlyWeb, !model.isWebWallpaper {
+                Text("Applies to web wallpapers. This one is a \(model.selectedTypeName) wallpaper.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
