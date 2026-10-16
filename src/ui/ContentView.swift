@@ -63,7 +63,7 @@ struct ContentView: View {
     private var sidebar: some View {
         List {
             Section("Library") {
-                sidebarButton("All Wallpapers", "square.grid.2x2", .library)
+                sidebarButton("Library", "square.grid.2x2", .library, count: model.library.count)
                 sidebarButton("Screens", "display", .screens)
                 sidebarButton("Settings", "gearshape", .settings)
             }
@@ -113,15 +113,32 @@ struct ContentView: View {
     /// A plain Button rather than `NavigationLink(value:)`: there is no
     /// `NavigationStack` in this window, so a value-based link had nowhere to
     /// push and silently did nothing.
-    private func sidebarButton(_ title: String, _ icon: String, _ target: SidebarPage) -> some View {
+    private func sidebarButton(
+        _ title: String,
+        _ icon: String,
+        _ target: SidebarPage,
+        count: Int? = nil
+    ) -> some View {
         let active = model.section == target
         return Button {
             model.go(target)
         } label: {
-            Label(title, systemImage: icon)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-                .foregroundStyle(active ? Color.white : Color.primary)
+            HStack(spacing: 9) {
+                Image(systemName: icon).frame(width: 18)
+                Text(title).font(.callout.weight(active ? .semibold : .regular))
+                Spacer(minLength: 6)
+                if let count {
+                    Text("\(count)")
+                        .font(.caption2.monospacedDigit())
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(.white.opacity(0.10)))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .foregroundStyle(active ? GoldenGate.tint : .primary)
         }
         .buttonStyle(.plain)
         .listRowBackground(
@@ -403,42 +420,49 @@ struct WallpaperCard: View {
     let onTap: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
+        VStack(alignment: .leading, spacing: 8) {
             thumbnail
+
             Text(entry.title)
-                .font(.callout)
+                .font(.callout.weight(.semibold))
                 .lineLimit(1)
-                .truncationMode(.tail)
-            HStack(spacing: 5) {
-                Text(entry.typeLabel)
+
+            Text(entry.description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Spacer(minLength: 0)
+
+            HStack(spacing: 6) {
+                Label(entry.traitBadge, systemImage: entry.symbol)
                     .font(.caption2)
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1)
-                    .background(Color.secondary.opacity(0.18), in: RoundedRectangle(cornerRadius: 3))
-                if isApplied {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.tint)
-                        .help("Currently applied")
-                }
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                Spacer(minLength: 6)
+                Button("Set Wallpaper") { onTap() }
+                    .font(.caption2.weight(.medium))
+                    .controlSize(.small)
+                    .disabled(isApplied)
             }
         }
-        .padding(8)
+        .padding(10)
+        .frame(height: 224, alignment: .top)
         .glassCard(cornerRadius: 13, tint: isSelected ? GoldenGate.tint : nil)
         .glassEdge(cornerRadius: 13, highlighted: isSelected)
         .shadow(color: isSelected ? GoldenGate.tint.opacity(0.30) : .clear, radius: 14, y: 4)
         .contentShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-        .scaleEffect(isSelected ? 1.02 : 1)
         .animation(LivelyMotion.select, value: isSelected)
         .onTapGesture(perform: onTap)
     }
 
     private var thumbnail: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 6)
+        ZStack(alignment: .topLeading) {
+            RoundedRectangle(cornerRadius: 8)
                 .fill(
                     LinearGradient(
-                        colors: [Color.secondary.opacity(0.22), Color.secondary.opacity(0.07)],
+                        colors: [Color.secondary.opacity(0.20), Color.secondary.opacity(0.06)],
                         startPoint: .top,
                         endPoint: .bottom
                     )
@@ -449,31 +473,40 @@ struct WallpaperCard: View {
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: .fill)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .clipped()
             } else {
-                Image(systemName: symbol)
-                    .font(.system(size: 26))
-                    .foregroundStyle(.secondary)
+                VStack(spacing: 5) {
+                    Image(systemName: entry.symbol).font(.system(size: 22, weight: .light))
+                    Text(entry.kindBadge).font(.caption2.weight(.medium))
+                }
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
+
+            HStack {
+                // The wallpaper's own declared renderer, never a guess.
+                Text(entry.engineBadge)
+                    .font(.system(size: 9, weight: .semibold))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(.black.opacity(0.55)))
+                    .foregroundStyle(.white.opacity(0.9))
+                Spacer()
+                if isApplied {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.caption)
+                        .foregroundStyle(GoldenGate.tint)
+                        .help("Currently applied")
+                }
+            }
+            .padding(7)
         }
-        .frame(height: 88)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(.separator, lineWidth: 0.5)
-        )
+        .frame(height: 100)
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.white.opacity(0.10), lineWidth: 1))
     }
 
-    private var symbol: String {
-        switch entry.wallpaperType {
-        case 0: return "film"
-        case 1, 2: return "globe"
-        case 3: return "app.badge"
-        case 4: return "photo"
-        case 5: return "photo"
-        case 6: return "sparkles"
-        default: return "questionmark.square.dashed"
-        }
-    }
 }
 
 /// Metadata and the apply controls for the selected wallpaper.

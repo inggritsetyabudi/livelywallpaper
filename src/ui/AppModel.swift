@@ -64,6 +64,60 @@ public func lively_ui_present() {
 // MARK: - Model
 
 /// Everything the settings window renders, mirroring what the daemon reports.
+/// Facts about a wallpaper that the redesigned cards surface.
+extension LibraryEntry {
+    /// The engine that will render it. This is the wallpaper's own declared
+    /// type, not a guess -- so the badge cannot claim Metal for a web page.
+    var engineBadge: String {
+        switch wallpaperType {
+        case 0: "AVFoundation"
+        case 1, 2: "WKWebView"
+        case 3: "App Bundle"
+        case 4: "ImageIO"
+        case 5: "NSImage"
+        case 6: "Metal"
+        default: "Unknown"
+        }
+    }
+
+    var kindBadge: String {
+        switch wallpaperType {
+        case 0: "Video"
+        case 1, 2: "Web"
+        case 3: "App"
+        case 4: "GIF"
+        case 5: "Image"
+        case 6: "Shader"
+        default: "Unknown"
+        }
+    }
+
+    var symbol: String {
+        switch wallpaperType {
+        case 0: "film"
+        case 1, 2: "globe"
+        case 3: "app.badge"
+        case 4: "photo.stack"
+        case 5: "photo"
+        case 6: "sparkles"
+        default: "questionmark"
+        }
+    }
+
+    /// One-line summary for the card footer.
+    var traitBadge: String {
+        switch wallpaperType {
+        case 0: "Audio + video"
+        case 1, 2: "Interactive"
+        case 3: "Interactive app"
+        case 4: "Animated"
+        case 5: "Static render"
+        case 6: "GPU vertex + fragment"
+        default: "—"
+        }
+    }
+}
+
 struct LibraryEntry: Identifiable, Decodable, Hashable {
     let id: String
     let title: String
