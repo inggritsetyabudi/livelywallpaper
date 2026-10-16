@@ -4,10 +4,10 @@ A native live wallpaper engine for macOS, with a SwiftUI settings window and a
 scriptable CLI. Image, video, web, and Metal shader wallpapers, with a library
 of six built-ins that ship with the app.
 
-> **Status: macOS is verified. Linux is not.**
-> The Linux backend has never been compiled or run — see
-> [docs/linux.md](docs/linux.md). Nothing in this README should be read as
-> claiming otherwise.
+> **Status: macOS is verified. Linux builds but has never been run.**
+> The Linux backend compiles and links, but no wallpaper has been shown on a
+> real X11 or Wayland session — see [docs/linux.md](docs/linux.md). Nothing in
+> this README should be read as claiming otherwise.
 
 ---
 
@@ -437,6 +437,8 @@ $ ./scripts/leak-check.sh                 # memory soak
 |---|---|
 | `scripts/make-app.sh` | Build and assemble `dist/Lively.app` |
 | `scripts/leak-check.sh` | Memory soak |
+| `scripts/linux-check.sh` | Compile the Linux backend (add `--link` to link) |
+| `scripts/linux-sysroot.sh` | Build a Linux sysroot for cross-compiling from macOS |
 | `scripts/make-icon.swift` | Generate the app icon |
 | `scripts/render-shader.swift` | Offline Metal shader renderer |
 
@@ -534,8 +536,9 @@ thumbnails, correct metadata, property controls that adapt per wallpaper type,
 and a wallpaper genuinely visible on the desktop.
 
 **Open items:** the Screens and Settings pages have not been visually
-confirmed; the Linux backend is unbuilt; random-wallpaper rotation, the audio
-visualiser, and any Linux GUI are unimplemented. All of this is enumerated in
+confirmed; the Linux backend compiles and links but has never been executed;
+random-wallpaper rotation, the audio visualiser, and any Linux GUI are
+unimplemented. All of this is enumerated in
 [docs/quality.md §5](docs/quality.md#5-what-has-not-been-verified).
 
 ---

@@ -77,7 +77,13 @@ fn build_linux() {
     println!("cargo:rustc-link-search=native={}", out_dir.display());
 
     // Core graphics surface + input.
-    for lib in ["xcb", "cairo", "EGL", "gl", "m", "pthread"] {
+    //
+    // xcb-randr is not optional. The backend enumerates monitors through
+    // RANDR because X11 screens are not monitors: a dual-display machine is one
+    // screen with two outputs. Without this the wallpaper window would be sized
+    // for the whole virtual desktop instead of a single panel, and
+    // per-monitor wallpapers would be impossible.
+    for lib in ["xcb", "xcb-randr", "cairo", "EGL", "gl", "m", "pthread"] {
         println!("cargo:rustc-link-lib={lib}");
     }
 

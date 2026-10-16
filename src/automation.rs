@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::ffi;
+use crate::platform;
 
 /// How often the watcher samples system state.
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -66,11 +66,12 @@ impl AutomationWatcher {
                 let mut last_cause: Option<PauseCause> = None;
 
                 while worker_flag.load(Ordering::Relaxed) {
-                    // Thread-safe: CoreGraphics + IOKit only, no AppKit.
-                    let fullscreen =
-                        pause_on_fullscreen && unsafe { ffi::lively_is_any_app_fullscreen() };
-                    let battery =
-                        pause_on_battery && unsafe { ffi::lively_is_running_on_battery() };
+                    // A platform power/focus query, not a macOS shim call.
+                    // The watcher is shared with the Linux build, where the
+                    // fullscreen answer comes from EWMH and battery from
+                    // sysfs.
+                    let fullscreen = pause_on_fullscreen && platform::any_app_fullscreen();
+                    let battery = pause_on_battery && platform::on_battery_power();
 
                     let cause = PauseCause::from_flags(fullscreen, battery);
 

@@ -19,6 +19,11 @@ mod automation;
 mod config;
 mod engine;
 mod error;
+// The Objective-C bridge. macOS-only by nature -- on Linux the equivalent
+// boundary is `platform::linux_sys`, which talks to XCB and Wayland instead.
+// This was previously compiled everywhere, which put AppKit-only symbols into
+// shared code and made the Linux target fail to link.
+#[cfg(target_os = "macos")]
 mod ffi;
 mod ipc;
 mod library;
@@ -552,11 +557,12 @@ fn to_ipc_command(command: &Commands) -> ipc::IpcCommand {
 // ---------------------------------------------------------------------------
 
 fn print_screens() -> Result<()> {
-    // SAFETY: called before any daemon exists, single-threaded startup.
-    if !unsafe { ffi::lively_init_app() } {
-        return Err(Error::Invalid("failed to initialise NSApplication".into()));
+    if !platform::ensure_app_initialised() {
+        return Err(Error::Invalid(
+            "could not initialise the platform display connection".into(),
+        ));
     }
-    let count = unsafe { ffi::lively_get_screen_count() };
+    let count = platform::screen_count();
     if count == 0 {
         println!("no screens attached");
         return Ok(());
@@ -567,28 +573,8 @@ fn print_screens() -> Result<()> {
         "IDX", "NAME", "WIDTH", "HEIGHT"
     );
     for i in 0..count {
-        let (mut w, mut h) = (0.0f64, 0.0f64);
-        unsafe {
-            ffi::lively_get_screen_bounds(
-                i,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                &mut w,
-                &mut h,
-            )
-        };
-
-        // Native returns a pointer into an autoreleased buffer; copy immediately.
-        let name = unsafe {
-            let ptr = ffi::lively_get_screen_name(i);
-            if ptr.is_null() {
-                String::from("unknown")
-            } else {
-                std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
-            }
-        };
-
-        println!("{:<4} {:<24} {:>10.0} x {:<10.0}", i, name, w, h);
+        let (name, w, h) = platform::screen_info(i);
+        println!("{:<4} {:<24} {:>10} x {:<10}", i, name, w, h);
     }
     Ok(())
 }
@@ -685,13 +671,13 @@ fn run_daemon(start_screensaver: bool, show_ui: bool) -> Result<()> {
     restore_wallpapers(state, &config);
 
     // Give the UI a way to talk back before anything can present it.
-    unsafe {
-        ui::lively_ui_set_handler(ui::ui_command_entry);
-    }
+    //
+    // Routed through the platform: macOS installs the Swift handler, and a
+    // platform with no bundled UI does nothing. Calling the shim directly here
+    // is what left the Linux build unable to link.
+    platform::register_ui_handler();
 
-    unsafe {
-        ffi::lively_setup_tray_menu(tray_callback);
-    }
+    platform::install_tray_menu(tray_callback);
     update_tray_title("Lively");
 
     let ipc_server = ipc::IpcServer::bind()?;
@@ -730,7 +716,7 @@ fn run_daemon(start_screensaver: bool, show_ui: bool) -> Result<()> {
         drain_pending_pause(state);
 
         // SAFETY: runs on the main thread, inside the run loop we own.
-        unsafe { ffi::lively_pump_events(EVENT_PUMP_TIMEOUT) };
+        platform::pump_events(EVENT_PUMP_TIMEOUT);
     }
 
     shutdown_reason(reason_of(SHUTDOWN_REASON.load(Ordering::Relaxed)));
@@ -832,9 +818,7 @@ static PENDING_PAUSE_CAUSE: std::sync::atomic::AtomicI8 = std::sync::atomic::Ato
 fn notify_main_loop() {
     // Nudge AppKit from another thread; this is explicitly allowed and simply
     // makes the run loop return so we can service state sooner.
-    unsafe {
-        ffi::lively_dispatch_on_main(nop_on_main, std::ptr::null_mut());
-    }
+    platform::dispatch_on_main(nop_on_main, std::ptr::null_mut());
 }
 
 extern "C" fn nop_on_main(_ctx: *mut c_void) {}
@@ -909,10 +893,7 @@ fn persist_shutdown_state(state: &AppState) {
 }
 
 fn update_tray_title(title: &str) {
-    if let Ok(c_title) = CString::new(title) {
-        // SAFETY: main thread; AppKit status item.
-        unsafe { ffi::lively_update_tray_title(c_title.as_ptr()) };
-    }
+    platform::set_tray_title(title);
 }
 
 // ---------------------------------------------------------------------------

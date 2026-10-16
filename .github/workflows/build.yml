@@ -77,7 +77,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libxcb1-dev libcairo2-dev libegl1-mesa-dev libgl1-mesa-dev \
+            libxcb1-dev libxcb-randr0-dev libcairo2-dev \
+            libegl1-mesa-dev libgl1-mesa-dev \
             libwayland-dev wayland-protocols \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libwebkit2gtk-4.1-dev
@@ -114,6 +115,6 @@ jobs:
         run: |
           gcc -fsyntax-only -Wall -Wextra \
             -DLIVELY_HAVE_VIDEO -DLIVELY_HAVE_WEB \
-            $(pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 gtk+-3.0 webkit2gtk-4.1 xcb cairo) \
+            $(pkg-config --cflags gstreamer-1.0 gstreamer-app-1.0 gtk+-3.0 webkit2gtk-4.1 xcb xcb-randr cairo) \
             src/platform/native/lively_linux.c
           "$BIN" shutdown || true

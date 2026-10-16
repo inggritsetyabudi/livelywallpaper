@@ -108,20 +108,26 @@ passed while the feature was fundamentally broken.
 
 Stated plainly, because the gap is larger than the verified surface.
 
-**Linux — not compiled, not run.** The X11/Wayland backend in
-`src/platform/linux_sys.rs` and `src/platform/native/lively_linux.c` has
-**never been built**. There is no Docker, no Linux Rust target, no cross
-toolchain, and no Cairo/XCB/GStreamer/WebKitGTK headers on the development
-machine. The CI job that would build it has not run.
+**Linux — builds, has never been run.** The backend now compiles and links
+into a working ELF binary, verified with `./scripts/linux-check.sh --link`
+from macOS against a cross toolchain. That is a real advance: before this, it
+had never been compiled, and it turned out not to even link.
 
-Specific concerns that are unproven rather than known-good:
+What remains unproven:
 
-- `SurfaceRecord` in Rust and `LivelySurface` in C are assumed to share a
-  layout and an ownership convention. This is asserted nowhere and verified
-  by nothing.
+- **Nothing has been executed.** No wallpaper has been shown on X11 or
+  Wayland. There was no container or VM available on the development machine,
+  and a Linux binary cannot run on macOS.
 - The Wayland path detects `zwlr_layer_shell_v1` via the registry but does not
   create a `wl_surface`.
-- The Linux event loop, shader renderer, and GUI are unimplemented.
+- The Linux shader renderer and GUI are unimplemented.
+- The CI Linux job has still never been observed green.
+
+The defects found by making it compile are listed in
+[linux.md](linux.md#what-was-fixed-to-get-here). Several of them — a
+double-free across the FFI boundary, a call with the wrong arity into
+`xcb_put_image`, X11 screens mistaken for monitors — would not have been
+caught by any amount of reading.
 
 **Visual verification** was done by capturing the real window
 (`screencapture -l<windowid>`), confirming: all six built-in thumbnails
@@ -155,6 +161,9 @@ LIVELY_UI_SELFTEST=1 ./dist/Lively.app/Contents/MacOS/Lively
 
 # Memory soak
 ./scripts/leak-check.sh
+
+# Linux backend: C shim, cargo check, test build, link
+./scripts/linux-check.sh --link
 
 # Confirm the self-test can fail (expect FAIL)
 # then revert the sabotage

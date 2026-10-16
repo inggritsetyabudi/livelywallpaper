@@ -65,6 +65,24 @@ impl LivelyConfig {
     /// Root of all per-user application state.
     pub fn support_dir() -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+
+        // XDG Base Directory on Linux, the conventional Application Support
+        // folder on macOS.
+        //
+        // Previously this hard-coded the macOS path, which meant a Linux user
+        // got a stray `~/Library/Application Support/LivelyWallpaper` in their
+        // home directory: wrong location, not where anything else looks, and
+        // invisible to the XDG tooling a Linux user would use to find or clean
+        // it up.
+        if cfg!(target_os = "linux") {
+            if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+                if !data_home.is_empty() {
+                    return PathBuf::from(data_home).join("LivelyWallpaper");
+                }
+            }
+            return PathBuf::from(&home).join(".local/share/LivelyWallpaper");
+        }
+
         PathBuf::from(home).join("Library/Application Support/LivelyWallpaper")
     }
 

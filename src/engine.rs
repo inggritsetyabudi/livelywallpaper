@@ -414,29 +414,49 @@ impl EngineManager {
             return Err(Error::NotOnMainThread("start_screensaver"));
         }
 
-        // SAFETY: main thread, inside the run loop we own.
-        let win = unsafe { crate::ffi::lively_create_screensaver_window(monitor) };
-        if win.is_null() {
-            return Err(Error::NativeAllocationFailed("screensaver window"));
+        // The screensaver is built on AppKit's screen-saver windows, which
+        // have no equivalent on X11 or Wayland. Report that plainly instead of
+        // pretending to start.
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (monitor, dismiss_cb);
+            return Err(Error::Invalid(
+                "the screensaver is macOS-only; a Linux wallpaper runs continuously and \
+                 cannot be handed over to a screen-saver surface."
+                    .into(),
+            ));
         }
-        self.screensaver_windows.push(win);
 
-        // Only one monitor may be active at a time: the native monitor is a
-        // single global, so starting twice would silently drop the first.
-        if self.screensaver_windows.len() == 1 {
-            // SAFETY: a plain function pointer, called from the main thread.
-            unsafe { crate::ffi::lively_start_screensaver_monitor(dismiss_cb) };
-        }
+        #[cfg(target_os = "macos")]
+        {
+            // SAFETY: main thread, inside the run loop we own.
+            let win = unsafe { crate::ffi::lively_create_screensaver_window(monitor) };
+            if win.is_null() {
+                return Err(Error::NativeAllocationFailed("screensaver window"));
+            }
+            self.screensaver_windows.push(win);
 
-        let target = self.screens[monitor as usize].current_target.clone();
-        match target {
-            Some(path) => log::info!("screensaver showing {path:?} on monitor {monitor}"),
-            None => log::info!("screensaver started on monitor {monitor} (no wallpaper set)"),
+            // Only one monitor may be active at a time: the native monitor is a
+            // single global, so starting twice would silently drop the first.
+            if self.screensaver_windows.len() == 1 {
+                // SAFETY: a plain function pointer, called from the main thread.
+                unsafe { crate::ffi::lively_start_screensaver_monitor(dismiss_cb) };
+            }
+
+            let target = self.screens[monitor as usize].current_target.clone();
+            match target {
+                Some(path) => log::info!("screensaver showing {path:?} on monitor {monitor}"),
+                None => log::info!("screensaver started on monitor {monitor} (no wallpaper set)"),
+            }
+            Ok(())
         }
-        Ok(())
     }
 
     pub fn stop_screensaver(&mut self) {
+        // The screensaver is macOS-only; see `start_screensaver`. There are
+        // no windows to tear down elsewhere, but the list is cleared so a
+        // later platform with the feature starts from a clean slate.
+        #[cfg(target_os = "macos")]
         // SAFETY: windows were produced by `lively_create_screensaver_window`
         // and are consumed exactly once here.
         unsafe {
@@ -445,6 +465,8 @@ impl EngineManager {
                 crate::ffi::lively_close_screensaver_window(win);
             }
         }
+        #[cfg(not(target_os = "macos"))]
+        self.screensaver_windows.clear();
     }
 
     /// Whether a screensaver surface is currently open.

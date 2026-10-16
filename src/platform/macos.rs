@@ -9,7 +9,7 @@ use std::path::Path;
 
 use crate::error::{Error, Result};
 use crate::ffi;
-use crate::platform::{Platform, Playback, PlaybackState, SurfaceKind, ViewHandle};
+use crate::platform::{Platform, Playback, PlaybackState, SurfaceKind, TrayCallback, ViewHandle};
 
 pub struct MacPlatform;
 
@@ -233,6 +233,36 @@ impl Platform for MacPlatform {
     fn register_ui_handler() {
         // SAFETY: `ui_command_entry` is a plain `extern "C"` fn with no captures.
         unsafe { crate::ui::lively_ui_set_handler(crate::ui::ui_command_entry) };
+    }
+
+    fn install_tray_menu(callback: TrayCallback) -> bool {
+        // SAFETY: `callback` is a plain `extern "C"` fn with no captures;
+        // AppKit stores it and calls it on the main thread.
+        unsafe { ffi::lively_setup_tray_menu(callback) };
+        true
+    }
+
+    fn set_tray_title(title: &str) {
+        if let Ok(c_title) = std::ffi::CString::new(title) {
+            // SAFETY: main thread; AppKit status item.
+            unsafe { ffi::lively_update_tray_title(c_title.as_ptr()) };
+        }
+    }
+
+    fn any_app_fullscreen() -> bool {
+        // SAFETY: CoreGraphics window list read; no AppKit, safe off-main.
+        unsafe { ffi::lively_is_any_app_fullscreen() }
+    }
+
+    fn on_battery_power() -> bool {
+        // SAFETY: IOKit power source read; safe off-main.
+        unsafe { ffi::lively_is_running_on_battery() }
+    }
+
+    fn dispatch_on_main(f: extern "C" fn(*mut c_void), ctx: *mut c_void) {
+        // SAFETY: `f` is a plain `extern "C"` fn with no captures, and
+        // `lively_dispatch_on_main` takes ownership of neither.
+        unsafe { ffi::lively_dispatch_on_main(f, ctx) };
     }
 }
 

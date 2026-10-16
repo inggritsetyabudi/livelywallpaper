@@ -31,7 +31,6 @@
 
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::error::{Error, Result};
 use crate::platform::{Platform, Playback, PlaybackState, SurfaceKind, ViewHandle};
@@ -73,19 +72,65 @@ impl VideoSupport {
     }
 }
 
-/// Monotonic id source for layer-shell surfaces.
-static NEXT_SURFACE: AtomicU32 = AtomicU32::new(1);
-
-/// A desktop-level window on X11 or Wayland.
+/// Narrows a view's surface pointer to the shim's opaque handle type.
 ///
-/// The pointer is an owned allocation holding a stable id; the real surface
-/// lives inside the platform backend, which owns its own bookkeeping.
+/// A `ViewHandle` is a raw pointer that may have been zeroed by the caller;
+/// the shim takes a `NonNull`, so the conversion happens once here rather than
+/// at every call site.
+fn view_handle(view: &ViewHandle) -> Option<crate::platform::linux_sys::SurfaceHandle> {
+    std::ptr::NonNull::new(view.ptr)
+}
+
+// ---------------------------------------------------------------------------
+// poll(2)
+//
+// Declared here rather than pulling in the `libc` crate: this is one struct and
+// one function, and the project has committed to keeping its dependency list
+// short enough to audit by eye.
+// ---------------------------------------------------------------------------
+
+type libc_c_int = i32;
+type libc_nfds_t = u64;
+
+const POLLIN: i16 = 0x001;
+
 #[repr(C)]
-pub struct SurfaceRecord {
-    pub screen_index: u32,
-    pub id: u32,
-    /// X11 window id, or 0 on Wayland where the handle is not an XID.
-    pub x11_window: u64,
+struct PollFd {
+    fd: libc_c_int,
+    events: i16,
+    revents: i16,
+}
+
+extern "C" {
+    fn poll(fds: *mut PollFd, nfds: libc_nfds_t, timeout: libc_c_int) -> libc_c_int;
+}
+
+/// Whether the machine is running on battery.
+///
+/// Reads sysfs rather than shelling out to `upower` or parsing `acpi`: it is
+/// the kernel's own interface, it is present on every Linux system with a
+/// battery, and it costs one small file read.
+///
+/// A desktop with no battery is on AC power by definition, so an absent
+/// `/sys/class/power_supply` BAT* entry answers false.
+fn battery_is_discharging() -> bool {
+    let Ok(dir) = std::fs::read_dir("/sys/class/power_supply") else {
+        return false;
+    };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !name.starts_with("BAT") {
+            continue;
+        }
+        let status = entry.path().join("status");
+        if let Ok(text) = std::fs::read_to_string(&status) {
+            if text.trim() == "Discharging" {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 pub struct LinuxPlatform;
@@ -118,10 +163,35 @@ impl Platform for LinuxPlatform {
     }
 
     fn pump_events(timeout_secs: f64) {
-        // No blocking run loop on Linux yet; sleep for the requested slice so
-        // callers keep their pacing and the process stays responsive to signals.
-        let capped = timeout_secs.clamp(0.0, 0.25);
-        std::thread::sleep(std::time::Duration::from_secs_f64(capped));
+        // Block on the display server's fd rather than spinning.
+        //
+        // The previous implementation slept for a fixed slice on every pass,
+        // which woke the daemon tens of times a second to do nothing. On a
+        // laptop that is measurable battery drain for a process whose only
+        // job is to sit behind the desktop. poll(2) sleeps in the kernel until
+        // the server actually has something to say, so an idle wallpaper
+        // costs no CPU at all.
+        let timeout_ms = (timeout_secs.clamp(0.0, 1.0) * 1000.0) as libc_c_int;
+
+        let Some(fd) = crate::platform::linux_sys::event_fd() else {
+            // Headless: nothing can ever arrive, so sleep the whole slice
+            // rather than calling poll on an invalid fd.
+            std::thread::sleep(std::time::Duration::from_millis(timeout_ms as u64));
+            return;
+        };
+
+        let mut fds = [PollFd {
+            fd,
+            events: POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: `fds` is a live, correctly sized array and `poll` only writes
+        // into its `revents` field. A negative return is EFAULT/EINTR and is
+        // deliberately ignored: the loop's timeout still bounds the wait, and
+        // a signal should simply let the next iteration run.
+        unsafe {
+            poll(fds.as_mut_ptr(), 1, timeout_ms);
+        }
     }
 
     fn wake() {
@@ -139,7 +209,7 @@ impl Platform for LinuxPlatform {
 
     fn create_surface(screen_index: u32) -> Result<*mut c_void> {
         let session = Self::session();
-        let record =
+        let handle =
             crate::platform::linux_sys::create_surface(session, screen_index).ok_or_else(|| {
                 Error::Invalid(match session {
                     Session::Wayland => {
@@ -155,19 +225,17 @@ impl Platform for LinuxPlatform {
                         .into(),
                 })
             })?;
-
-        let boxed = Box::into_raw(Box::new(record));
-        Ok(boxed.cast())
+        Ok(handle.as_ptr())
     }
 
     fn destroy_surface(surface: *mut c_void) {
-        if surface.is_null() {
+        // SAFETY: every pointer handed out by `create_surface` came from the C
+        // shim and is returned exactly once. It is freed by C, which is also
+        // where it was allocated -- see the ownership note in `linux_sys`.
+        let Some(handle) = std::ptr::NonNull::new(surface) else {
             return;
-        }
-        // SAFETY: every pointer handed out by `create_surface` came from
-        // `Box::into_raw` and is returned exactly once.
-        let record = unsafe { Box::from_raw(surface.cast::<SurfaceRecord>()) };
-        crate::platform::linux_sys::destroy_surface(Self::session(), record);
+        };
+        crate::platform::linux_sys::destroy_surface(handle);
     }
 
     fn is_main_thread() -> bool {
@@ -177,75 +245,98 @@ impl Platform for LinuxPlatform {
     }
 
     fn create_view(surface: *mut c_void, target: &Path, kind: SurfaceKind) -> Result<ViewHandle> {
-        if surface.is_null() {
+        let Some(handle) = std::ptr::NonNull::new(surface) else {
             return Err(Error::Invalid("surface has already been destroyed".into()));
-        }
+        };
         if !target.exists() {
             return Err(Error::PathNotFound(target.to_path_buf()));
         }
 
         let support = VideoSupport::detect();
-        match kind {
-            SurfaceKind::Image => {
-                crate::platform::linux_sys::create_image_view(surface, target)?;
-                Ok(ViewHandle { ptr: surface, kind })
-            }
+        let created = match kind {
+            SurfaceKind::Image => crate::platform::linux_sys::create_image_view(handle, target),
             SurfaceKind::Video if support.video => {
-                crate::platform::linux_sys::create_video_view(surface, target)?;
-                Ok(ViewHandle { ptr: surface, kind })
+                crate::platform::linux_sys::create_video_view(handle, target)
             }
             SurfaceKind::WebFile | SurfaceKind::WebUrl if support.web => {
-                crate::platform::linux_sys::create_web_view(surface, target)?;
-                Ok(ViewHandle { ptr: surface, kind })
+                crate::platform::linux_sys::create_web_view(handle, target)
             }
-            SurfaceKind::Shader => {
-                crate::platform::linux_sys::create_shader_view(surface, target)?;
-                Ok(ViewHandle { ptr: surface, kind })
+            SurfaceKind::Shader => crate::platform::linux_sys::create_shader_view(handle, target),
+            SurfaceKind::Video => {
+                return Err(Error::Invalid(
+                    "video wallpapers need the GStreamer stack, which this build does \
+                     not include. Rebuild with `--features linux-video`."
+                        .into(),
+                ))
             }
-            SurfaceKind::Video => Err(Error::Invalid(
-                "video wallpapers need the GStreamer stack, which this build does \
-                 not include. Rebuild with `--features linux-video`."
-                    .into(),
-            )),
-            SurfaceKind::WebFile | SurfaceKind::WebUrl => Err(Error::Invalid(
-                "web wallpapers need WebKitGTK, which this build does not include. \
-                 Rebuild with `--features linux-web`."
-                    .into(),
-            )),
+            SurfaceKind::WebFile | SurfaceKind::WebUrl => {
+                return Err(Error::Invalid(
+                    "web wallpapers need WebKitGTK, which this build does not include. \
+                     Rebuild with `--features linux-web`."
+                        .into(),
+                ))
+            }
+        };
+
+        if !created {
+            // The shim reports failure for a missing or undecodable file, an
+            // unsupported format, and -- for video -- a pipeline that never
+            // reached PLAYING. A generic message here is deliberately vague,
+            // because the shim does not yet carry the reason across.
+            return Err(Error::Invalid(format!(
+                "could not render {} -- the file may be missing, in an unsupported \
+                 format, or refused by the decoder",
+                target.display()
+            )));
         }
+
+        // On Linux the wallpaper is drawn straight into the surface's own
+        // window, so there is no separate view object: the surface *is* the
+        // view. `ptr` therefore aliases the surface rather than holding a
+        // distinct handle, and `destroy_view` is a no-op for exactly that
+        // reason. The macOS backend does hold a separate view here.
+        //
+        // Consequence to preserve: `destroy_surface` is the only thing that
+        // may free this pointer. If a separate view object is ever added on
+        // Linux, this aliasing has to be revisited in the same change.
+        Ok(ViewHandle { ptr: surface, kind })
     }
 
     fn swap_view_source(view: &ViewHandle, target: &Path) -> bool {
         match view.kind {
-            SurfaceKind::Image => crate::platform::linux_sys::swap_image_source(view.ptr, target),
+            SurfaceKind::Image => view_handle(view)
+                .is_some_and(|h| crate::platform::linux_sys::swap_image_source(h, target)),
             _ => false,
         }
     }
 
     fn destroy_view(_view: ViewHandle) {
-        // Views are torn down with their surface on Linux: the Cairo surface is
-        // owned by the window record, so dropping the surface drops them too.
+        // Deliberately empty: the view is the surface. See `create_view` for
+        // why tearing it down here would free a window the engine still uses.
     }
 
     fn set_playing(view: &ViewHandle, playing: bool) {
+        let Some(h) = view_handle(view) else { return };
         match view.kind {
-            SurfaceKind::Video => crate::platform::linux_sys::set_video_playing(view.ptr, playing),
-            SurfaceKind::Shader => {
-                crate::platform::linux_sys::set_shader_paused(view.ptr, !playing)
-            }
+            SurfaceKind::Video => crate::platform::linux_sys::set_video_playing(h, playing),
+            SurfaceKind::Shader => crate::platform::linux_sys::set_shader_paused(h, !playing),
             _ => {}
         }
     }
 
     fn set_volume(view: &ViewHandle, volume: f32) {
         if view.kind == SurfaceKind::Video {
-            crate::platform::linux_sys::set_video_volume(view.ptr, volume);
+            if let Some(h) = view_handle(view) {
+                crate::platform::linux_sys::set_video_volume(h, volume);
+            }
         }
     }
 
     fn seek(view: &ViewHandle, percent: f64) {
         if view.kind == SurfaceKind::Video {
-            crate::platform::linux_sys::seek_video(view.ptr, percent);
+            if let Some(h) = view_handle(view) {
+                crate::platform::linux_sys::seek_video(h, percent);
+            }
         }
     }
 
@@ -257,7 +348,14 @@ impl Platform for LinuxPlatform {
                 duration: -1.0,
             };
         }
-        crate::platform::linux_sys::video_playback(view.ptr)
+        match view_handle(view) {
+            Some(h) => crate::platform::linux_sys::video_playback(h),
+            None => Playback {
+                state: PlaybackState::Unknown,
+                position: -1.0,
+                duration: -1.0,
+            },
+        }
     }
 
     fn send_property(_view: &ViewHandle, _name: &str, _value: &str) -> Result<()> {
@@ -271,7 +369,25 @@ impl Platform for LinuxPlatform {
     fn reload_web(_view: &ViewHandle) {}
 
     fn capture(surface: *mut c_void, out_path: &Path) -> Result<()> {
-        crate::platform::linux_sys::capture(surface, out_path)
+        let Some(handle) = std::ptr::NonNull::new(surface) else {
+            return Err(Error::Invalid("surface has already been destroyed".into()));
+        };
+        crate::platform::linux_sys::capture(handle, out_path)
+    }
+
+    fn any_app_fullscreen() -> bool {
+        match Self::session() {
+            Session::X11 => crate::platform::linux_sys::x11_any_fullscreen(),
+            // Wayland deliberately keeps _NET_ACTIVE_WINDOW out of the
+            // protocol -- the whole point of Wayland is that clients cannot
+            // observe other windows. Reporting false is the only honest
+            // answer; guessing true would pause wallpapers at random.
+            Session::Wayland | Session::None => false,
+        }
+    }
+
+    fn on_battery_power() -> bool {
+        battery_is_discharging()
     }
 
     fn present_ui() -> Result<()> {

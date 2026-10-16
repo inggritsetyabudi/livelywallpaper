@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::LivelyConfig;
 use crate::error::Result;
+// The Objective-C bridge exists only on macOS. The rest of this module -- the
+// JSON snapshot the CLI reads and the IPC action dispatcher -- is portable, so
+// only the bridge is gated.
+#[cfg(target_os = "macos")]
 use crate::ffi;
 use crate::library::LibraryManager;
 use crate::state::AppState;
@@ -146,8 +150,12 @@ pub struct PropertyEntry {
 
 /// Show the settings window. Falls back to a log line if the UI is missing.
 pub fn present() {
-    // SAFETY: the Swift side tolerates a NULL handler and shows an error state.
-    unsafe { ffi::lively_ui_present() };
+    // The platform decides whether there is a window to show. macOS presents
+    // the SwiftUI settings window; the Linux build has none yet and says so
+    // rather than pretending the command worked.
+    if let Err(e) = crate::platform::present_ui() {
+        log::warn!("could not present the settings window: {e}");
+    }
 }
 
 /// Ask the UI to redraw from a fresh snapshot.
@@ -157,7 +165,10 @@ pub fn present() {
 #[allow(dead_code)]
 pub fn refresh() {
     // SAFETY: `lively_ui_refresh` dispatches to the main queue internally.
-    unsafe { ffi::lively_ui_refresh() };
+    #[cfg(target_os = "macos")]
+    unsafe {
+        ffi::lively_ui_refresh();
+    }
 }
 
 /// Whether the Swift half is linked in.
@@ -165,8 +176,16 @@ pub fn refresh() {
 /// Lets the CLI report a clear message if the app was ever built without the UI.
 #[allow(dead_code)]
 pub fn available() -> bool {
+    // The UI is a macOS-only artefact; there is nothing to link elsewhere.
+    #[cfg(target_os = "macos")]
     // SAFETY: reads a Swift global; safe from any thread.
-    unsafe { ffi::lively_ui_available() }
+    unsafe {
+        ffi::lively_ui_available()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -184,6 +203,7 @@ pub fn available() -> bool {
 /// Must be called on the main thread, before any UI action can arrive, with a
 /// valid function pointer.
 #[no_mangle]
+#[cfg(target_os = "macos")]
 pub unsafe extern "C" fn lively_ui_set_handler(handler: ffi::LivelyUiCommandHandler) {
     use std::sync::atomic::Ordering;
 
@@ -195,6 +215,11 @@ pub unsafe extern "C" fn lively_ui_set_handler(handler: ffi::LivelyUiCommandHand
     // Swift stores the handler itself, so it must be told. The pointer crosses
     // as an integer because Swift cannot hold a Rust function pointer in a
     // typed property without a bit cast.
+    //
+    // This calls straight into the shim, *not* `platform::register_ui_handler`.
+    // The platform entry point exists for the daemon to install the handler in
+    // the first place; routing back through it here would make this function
+    // call itself, and the recursion ends in a stack overflow during startup.
     ffi::lively_ui_install_handler(handler as usize);
 }
 
@@ -567,7 +592,7 @@ fn screen_entries(state: &AppState) -> Result<Vec<ScreenEntry>> {
     let mut screens = Vec::with_capacity(count);
 
     for index in 0..count {
-        let (name, width, height) = ffi::screen_info(index as u32);
+        let (name, width, height) = crate::platform::screen_info(index as u32);
         let path = cfg.active_wallpapers.get(&(index as u32)).cloned();
 
         // Map the stored path back to a library id so the UI can show what is

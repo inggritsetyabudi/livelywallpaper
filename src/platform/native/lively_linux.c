@@ -28,6 +28,7 @@
 
 #include <cairo/cairo.h>
 #include <xcb/xcb.h>
+#include <xcb/randr.h>
 
 /* GLib's `gboolean` is an int; without a media stack there is no GLib. */
 typedef int gboolean;
@@ -76,6 +77,9 @@ typedef struct {
     uint32_t screen_index;
     uint32_t id;
     uint64_t x11_window;   /* 0 on Wayland: the handle is not an XID. */
+    /* Graphics context for put_image. Required: X11 will not draw to a window
+     * without one, and it is expensive to recreate per frame. */
+    uint64_t x11_gc;
     int session;
     int kind;
     int playing;
@@ -118,6 +122,15 @@ static uint32_t g_wl_shm = 0;
 static bool g_have_layer_shell = false;
 #endif
 
+/* A monitor's position and size, in root-window coordinates. */
+typedef struct {
+    int16_t x, y;
+    uint16_t w, h;
+} MonitorRect;
+
+#ifdef LIVELY_HAVE_WAYLAND
+/* True when the environment actually advertises this session. Only the
+ * Wayland connect path consults it. */
 static bool session_is(int session) {
     if (session == LIVELY_SESSION_WAYLAND) {
         return getenv("WAYLAND_DISPLAY") != NULL;
@@ -127,10 +140,93 @@ static bool session_is(int session) {
     }
     return false;
 }
+#endif
+
+/* Forward declarations. The screen helpers below call these before they are
+ * defined further down; without these the C compiler treats them as
+ * returning int, which on LP64 mis-declares `xcb_window_t` and silently
+ * truncates the handle. */
+static bool lively_x11_connect(void);
+static xcb_atom_t intern_atom(xcb_connection_t *c, const char *name);
+static xcb_atom_t a_active_window;
+static xcb_atom_t a_wm_state;
+static xcb_atom_t a_wm_state_fullscreen;
+static uint32_t monitor_count(void);
+static bool monitor_rect(uint32_t index, MonitorRect *out);
+#ifdef LIVELY_HAVE_WAYLAND
+static bool lively_wayland_connect(void);
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Screens                                                             */
 /* ------------------------------------------------------------------ */
+
+/*
+ * Whether any window is currently fullscreen.
+ *
+ * X11 has no single answer, so this asks the standard EWMH way: the compositor
+ * or window manager publishes _NET_ACTIVE_WINDOW on the root, and that window
+ * advertises _NET_WM_STATE_FULLSCREEN when it occupies the whole screen.
+ *
+ * Returns false when it cannot tell. Guessing "true" would pause wallpapers
+ * for reasons the user cannot see, which is worse than the reverse.
+ */
+bool lively_x11_any_fullscreen(void) {
+    if (!lively_x11_connect()) return false;
+
+    const xcb_query_extension_reply_t *ext =
+        xcb_get_extension_data(g_xcb, &xcb_randr_id);
+    (void)ext;
+
+    xcb_atom_t net_active = a_active_window;
+    if (net_active == XCB_ATOM_NONE) {
+        net_active = intern_atom(g_xcb, "_NET_ACTIVE_WINDOW");
+        a_active_window = net_active;
+    }
+    if (net_active == XCB_ATOM_NONE) return false;
+
+    xcb_get_property_reply_t *prop = xcb_get_property_reply(
+        g_xcb,
+        xcb_get_property(g_xcb, 0, g_xcb_screen->root, net_active,
+                         XCB_ATOM_WINDOW, 0, 1),
+        NULL);
+    if (!prop) return false;
+
+    xcb_window_t active = XCB_NONE;
+    if (xcb_get_property_value_length(prop) >= (int)sizeof(xcb_window_t)) {
+        active = *(xcb_window_t *)xcb_get_property_value(prop);
+    }
+    free(prop);
+    if (active == XCB_NONE) return false;
+
+    xcb_atom_t net_wm_state = a_wm_state;
+    if (net_wm_state == XCB_ATOM_NONE) {
+        net_wm_state = intern_atom(g_xcb, "_NET_WM_STATE");
+        a_wm_state = net_wm_state;
+    }
+    xcb_atom_t fullscreen = a_wm_state_fullscreen;
+    if (fullscreen == XCB_ATOM_NONE) {
+        fullscreen = intern_atom(g_xcb, "_NET_WM_STATE_FULLSCREEN");
+        a_wm_state_fullscreen = fullscreen;
+    }
+    if (net_wm_state == XCB_ATOM_NONE || fullscreen == XCB_ATOM_NONE) return false;
+
+    /* A window has at most a handful of states; ask for 32 to be safe. */
+    xcb_get_property_reply_t *states = xcb_get_property_reply(
+        g_xcb,
+        xcb_get_property(g_xcb, 0, active, net_wm_state, XCB_ATOM_ATOM, 0, 32),
+        NULL);
+    if (!states) return false;
+
+    const int len = xcb_get_property_value_length(states) / (int)sizeof(xcb_atom_t);
+    const xcb_atom_t *atoms = xcb_get_property_value(states);
+    bool full = false;
+    for (int i = 0; atoms && i < len; i++) {
+        if (atoms[i] == fullscreen) { full = true; break; }
+    }
+    free(states);
+    return full;
+}
 
 uint32_t lively_screen_count(int session) {
     if (session == LIVELY_SESSION_X11 && !lively_x11_connect()) {
@@ -145,30 +241,43 @@ uint32_t lively_screen_count(int session) {
     }
 #endif
     if (session == LIVELY_SESSION_X11) {
-        return (uint32_t)g_xcb_screen_count;
+        return monitor_count();
     }
     return 0;
 }
 
-uint32_t lively_screen_width(int session, uint32_t index) {
-    if (session == LIVELY_SESSION_X11 && g_xcb_screen) {
-        int count = xcb_get_setup(g_xcb)->roots_len;
-        xcb_screen_t *s = xcb_setup_roots_iterator(xcb_get_setup(g_xcb)).data;
-        for (int i = 0; i < count; i++) {
-            if ((uint32_t)i == index) return s[i].width_in_pixels;
-        }
+/*
+ * The descriptor the main loop should block on.
+ *
+ * Returning the raw display fd lets the daemon sleep in poll(2) instead of
+ * spinning. An earlier version slept for a fixed slice on every iteration,
+ * which wakes the process tens of times a second to do nothing -- expensive
+ * on a laptop and exactly the busy-wait this backend must avoid.
+ *
+ * Returns -1 when no display is reachable, which is also the signal to fall
+ * back to a plain timed sleep.
+ */
+int lively_event_fd(void) {
+    if (lively_x11_connect()) {
+        return xcb_get_file_descriptor(g_xcb);
     }
+#ifdef LIVELY_HAVE_WAYLAND
+    if (lively_wayland_connect()) {
+        return wl_display_get_fd(g_wl_display);
+    }
+#endif
+    return -1;
+}
+
+uint32_t lively_screen_width(int session, uint32_t index) {
+    MonitorRect r;
+    if (session == LIVELY_SESSION_X11 && monitor_rect(index, &r)) return r.w;
     return 0;
 }
 
 uint32_t lively_screen_height(int session, uint32_t index) {
-    if (session == LIVELY_SESSION_X11 && g_xcb_screen) {
-        int count = xcb_setup_roots_iterator(xcb_get_setup(g_xcb)).data ? g_xcb_screen_count : 0;
-        xcb_screen_t *s = xcb_setup_roots_iterator(xcb_get_setup(g_xcb)).data;
-        for (int i = 0; i < count; i++) {
-            if ((uint32_t)i == index) return s[i].height_in_pixels;
-        }
-    }
+    MonitorRect r;
+    if (session == LIVELY_SESSION_X11 && monitor_rect(index, &r)) return r.h;
     return 0;
 }
 
@@ -211,6 +320,10 @@ static xcb_atom_t intern_atom(xcb_connection_t *c, const char *name) {
 
 static xcb_atom_t a_desktop_type = XCB_ATOM_NONE;
 static xcb_atom_t a_below = XCB_ATOM_NONE;
+static xcb_atom_t a_active_window = XCB_ATOM_NONE;
+static xcb_atom_t a_wm_state = XCB_ATOM_NONE;
+static xcb_atom_t a_wm_state_fullscreen = XCB_ATOM_NONE;
+
 static bool g_atoms_ready = false;
 
 static void ensure_atoms(xcb_connection_t *c) {
@@ -220,31 +333,149 @@ static void ensure_atoms(xcb_connection_t *c) {
     g_atoms_ready = true;
 }
 
-static xcb_window_t create_desktop_window(uint32_t index) {
-    if (!lively_x11_connect()) return 0;
+/*
+ * Monitor geometry.
+ *
+ * X11 screens are *not* monitors. A dual-display machine is a single X screen
+ * with two RANDR outputs -- the classic Xinerama-style layout that every
+ * modern desktop uses. Treating screens as monitors therefore reported one
+ * display on a two-display machine and made per-monitor wallpapers silently
+ * impossible.
+ *
+ * RANDR is queried for real outputs and only falls back to screens when the
+ * extension is missing, which is rare but does happen on bare Xvfb.
+ */
 
+
+static bool monitor_rect(uint32_t index, MonitorRect *out) {
+    if (!lively_x11_connect()) return false;
+
+    const xcb_query_extension_reply_t *ext =
+        xcb_get_extension_data(g_xcb, &xcb_randr_id);
+    if (ext && ext->present) {
+        xcb_randr_get_screen_resources_current_reply_t *res =
+            xcb_randr_get_screen_resources_current_reply(g_xcb,
+                xcb_randr_get_screen_resources_current(g_xcb, g_xcb_screen->root), NULL);
+        if (res) {
+            xcb_randr_output_t *outputs = xcb_randr_get_screen_resources_current_outputs(res);
+            const int n = xcb_randr_get_screen_resources_current_outputs_length(res);
+
+            uint32_t seen = 0;
+            for (int i = 0; i < n; i++) {
+                xcb_randr_get_output_info_reply_t *oi =
+                    xcb_randr_get_output_info_reply(g_xcb,
+                        xcb_randr_get_output_info(g_xcb, outputs[i], res->config_timestamp),
+                        NULL);
+                if (!oi) continue;
+
+                /* Skip outputs that are not driving a monitor right now: a
+                 * disconnected port still appears in the output list. */
+                if (oi->connection != XCB_RANDR_CONNECTION_CONNECTED ||
+                    oi->crtc == XCB_NONE) {
+                    free(oi);
+                    continue;
+                }
+
+                xcb_randr_get_crtc_info_reply_t *ci =
+                    xcb_randr_get_crtc_info_reply(g_xcb,
+                        xcb_randr_get_crtc_info(g_xcb, oi->crtc, res->config_timestamp),
+                        NULL);
+                free(oi);
+                if (!ci) continue;
+
+                if (seen == index) {
+                    out->x = ci->x;
+                    out->y = ci->y;
+                    out->w = ci->width;
+                    out->h = ci->height;
+                    free(ci);
+                    free(res);
+                    return out->w > 0 && out->h > 0;
+                }
+                seen++;
+                free(ci);
+            }
+            free(res);
+        }
+    }
+
+    /* Fallback: treat X screens as monitors. */
     xcb_screen_iterator_t it = xcb_setup_roots_iterator(xcb_get_setup(g_xcb));
     for (uint32_t i = 0; i < index && it.rem; i++) xcb_screen_next(&it);
-    if (!it.rem) return 0;
+    if (!it.rem) return false;
+    out->x = 0;
+    out->y = 0;
+    out->w = it.data->width_in_pixels;
+    out->h = it.data->height_in_pixels;
+    return true;
+}
 
-    xcb_window_t root = it.data->root;
+static uint32_t monitor_count(void) {
+    if (!lively_x11_connect()) return 0;
+
+    const xcb_query_extension_reply_t *ext =
+        xcb_get_extension_data(g_xcb, &xcb_randr_id);
+    if (ext && ext->present) {
+        xcb_randr_get_screen_resources_current_reply_t *res =
+            xcb_randr_get_screen_resources_current_reply(g_xcb,
+                xcb_randr_get_screen_resources_current(g_xcb, g_xcb_screen->root), NULL);
+        if (res) {
+            xcb_randr_output_t *outputs = xcb_randr_get_screen_resources_current_outputs(res);
+            const int n = xcb_randr_get_screen_resources_current_outputs_length(res);
+            uint32_t seen = 0;
+            for (int i = 0; i < n; i++) {
+                xcb_randr_get_output_info_reply_t *oi =
+                    xcb_randr_get_output_info_reply(g_xcb,
+                        xcb_randr_get_output_info(g_xcb, outputs[i], res->config_timestamp),
+                        NULL);
+                if (!oi) continue;
+                if (oi->connection == XCB_RANDR_CONNECTION_CONNECTED && oi->crtc != XCB_NONE)
+                    seen++;
+                free(oi);
+            }
+            free(res);
+            if (seen > 0) return seen;
+        }
+    }
+    return (uint32_t)g_xcb_screen_count;
+}
+
+static xcb_window_t create_desktop_window(uint32_t index, xcb_gcontext_t *out_gc) {
+    if (!lively_x11_connect()) return 0;
+
+    MonitorRect rect;
+    if (!monitor_rect(index, &rect)) return 0;
+
+    xcb_screen_t *screen = g_xcb_screen;
     xcb_window_t win = xcb_generate_id(g_xcb);
 
     uint32_t mask = XCB_CW_BACK_PIXEL | XCB_CW_OVERRIDE_REDIRECT | XCB_CW_EVENT_MASK;
     uint32_t values[3];
-    values[0] = it.data->black_pixel;
-    /* Override-redirect bypasses the window manager, which is what keeps the
-     * window from being focused, moved or restyled. */
+    values[0] = screen->black_pixel;
+    /* Override-redirect bypasses the window manager entirely. That is what
+     * guarantees this window can never be focused, moved, restyled or given a
+     * close button -- it has no frame the user can interact with.
+     *
+     * The consequence is that the EWMH hints below are advisory only: an
+     * unmanaged window ignores _NET_WM_WINDOW_TYPE. Stacking is therefore
+     * handled explicitly after mapping, not by the WM. */
     values[1] = 1;
+    /* Exposure so a redraw can be triggered when something uncovers the
+     * desktop, and StructureNotify so hotplug and resizes are observed.
+     *
+     * No key, button or motion mask is requested, so the surface physically
+     * cannot receive input -- it does not merely decline to act on it. */
     values[2] = XCB_EVENT_MASK_EXPOSURE | XCB_EVENT_MASK_STRUCTURE_NOTIFY;
 
-    xcb_create_window(g_xcb, XCB_COPY_FROM_PARENT, win, root,
-                     0, 0, it.data->width_in_pixels, it.data->height_in_pixels,
-                     0, XCB_WINDOW_CLASS_INPUT_OUTPUT, it.data->root_visual,
+    xcb_create_window(g_xcb, XCB_COPY_FROM_PARENT, win, g_xcb_screen->root,
+                     rect.x, rect.y, rect.w, rect.h,
+                     0, XCB_WINDOW_CLASS_INPUT_OUTPUT, screen->root_visual,
                      mask, values);
 
     ensure_atoms(g_xcb);
 
+    /* Kept for compositors that do honour EWMH on override-redirect windows,
+     * and harmless otherwise. */
     uint32_t type = intern_atom(g_xcb, "_NET_WM_WINDOW_TYPE_DESKTOP");
     if (type != XCB_ATOM_NONE && a_desktop_type != XCB_ATOM_NONE) {
         xcb_change_property(g_xcb, XCB_PROP_MODE_REPLACE, win, a_desktop_type,
@@ -257,14 +488,36 @@ static xcb_window_t create_desktop_window(uint32_t index) {
                             XCB_ATOM_ATOM, 32, 1, &state);
     }
 
+    /* X11 refuses to draw to a window with no graphics context, so one is
+     * created up front and reused for every frame. Recreating it per frame
+     * would add a round trip for nothing. */
+    xcb_gcontext_t gc = xcb_generate_id(g_xcb);
+    uint32_t gc_mask = XCB_GC_GRAPHICS_EXPOSURES;
+    uint32_t graphics_exposures = 0;
+    xcb_create_gc(g_xcb, gc, win, gc_mask, &graphics_exposures);
+    if (out_gc) *out_gc = gc;
+
     xcb_map_window(g_xcb, win);
+
+    /* An override-redirect window is mapped at the top of the stack because
+     * no window manager re-stacks it. Without this the wallpaper would cover
+     * every application window on the desktop. */
+    uint32_t stack_values[2];
+    stack_values[0] = XCB_STACK_MODE_BELOW;
+    stack_values[1] = XCB_NONE;
+    xcb_configure_window(g_xcb, win,
+                         XCB_CONFIG_WINDOW_STACK_MODE | XCB_CONFIG_WINDOW_SIBLING,
+                         stack_values);
+
     xcb_flush(g_xcb);
     return win;
 }
 
-static void destroy_desktop_window(xcb_window_t win) {
-    if (!g_xcb || win == 0) return;
-    xcb_destroy_window(g_xcb, win);
+static void destroy_desktop_window(xcb_window_t win, xcb_gcontext_t gc) {
+    if (!g_xcb) return;
+    /* Free the GC first: it references the window as its drawable. */
+    if (gc != XCB_NONE) xcb_free_gc(g_xcb, gc);
+    if (win != 0) xcb_destroy_window(g_xcb, win);
     xcb_flush(g_xcb);
 }
 
@@ -410,16 +663,18 @@ void *lively_create_surface(int session, uint32_t screen_index) {
     LivelySurface *surface = calloc(1, sizeof(LivelySurface));
     if (!surface) return NULL;
 
+    xcb_gcontext_t gc = XCB_NONE;
     surface->screen_index = screen_index;
     surface->session = session;
     surface->volume = 1.0;
 
     if (session == LIVELY_SESSION_X11) {
-        surface->x11_window = create_desktop_window(screen_index);
+        surface->x11_window = create_desktop_window(screen_index, &gc);
         if (surface->x11_window == 0) {
             free(surface);
             return NULL;
         }
+        surface->x11_gc = gc;
     } else {
 #ifdef LIVELY_HAVE_WAYLAND
         if (!lively_wayland_connect() || !g_have_layer_shell) {
@@ -468,7 +723,7 @@ void lively_destroy_surface(void *handle) {
         surface->image = NULL;
     }
     if (surface->session == LIVELY_SESSION_X11 && surface->x11_window) {
-        destroy_desktop_window((xcb_window_t)surface->x11_window);
+        destroy_desktop_window((xcb_window_t)surface->x11_window, (xcb_gcontext_t)surface->x11_gc);
     }
     free(surface);
 }
@@ -519,17 +774,24 @@ static int draw_image(LivelySurface *surface, const char *path) {
     }
     cairo_destroy(cr);
 
-    /* Upload to the window. */
-    if (surface->session == LIVELY_SESSION_X11 && g_xcb) {
-        xcb_pixmap_t pixmap = xcb_generate_id(g_xcb);
+    /* Upload to the window.
+     *
+     * The image goes straight to the window with a GC. An earlier version
+     * rendered into a throwaway pixmap and freed it in the same breath, which
+     * transferred megabytes per frame for no visible result -- the pixmap was
+     * always gone before the server could display it. */
+    if (surface->session == LIVELY_SESSION_X11 && g_xcb &&
+        surface->x11_window != 0 && surface->x11_gc != 0) {
         uint32_t depth = g_xcb_screen ? g_xcb_screen->root_depth : 24;
-        xcb_create_pixmap(g_xcb, depth, pixmap, (xcb_window_t)surface->x11_window,
-                          (uint16_t)w, (uint16_t)h);
-        xcb_put_image(g_xcb, XCB_IMAGE_FORMAT_Z_PIXMAP, pixmap,
-                      (xcb_window_t)surface->x11_window, g_xcb_screen->root_visual,
-                      0, 0, 0, 0, (uint16_t)w, (uint16_t)h, 32, (uint16_t)w * 4,
-                      cairo_image_surface_get_data(target));
-        xcb_free_pixmap(g_xcb, pixmap);
+        /* Z_PIXMAP rows must be padded to a 4-byte boundary; cairo's ARGB32
+         * is already 4 bytes per pixel so the natural stride is aligned. */
+        uint32_t stride = (uint32_t)cairo_image_surface_get_stride(target);
+        xcb_put_image(g_xcb, XCB_IMAGE_FORMAT_Z_PIXMAP,
+                      (xcb_drawable_t)surface->x11_window,
+                      (xcb_gcontext_t)surface->x11_gc,
+                      (uint16_t)w, (uint16_t)h,
+                      0, 0, 0, (uint8_t)depth,
+                      stride, cairo_image_surface_get_data(target));
         xcb_flush(g_xcb);
     }
 
@@ -791,6 +1053,7 @@ void lively_seek(void *handle, double percent) {
 /* Pumps queued pipeline events and refreshes position, called from the draw
  * pass so the UI can report an honest state. */
 void lively_refresh_video(void *handle) {
+    (void)handle;
 #ifdef LIVELY_HAVE_VIDEO
     if (!handle) return;
     LivelySurface *surface = (LivelySurface *)handle;

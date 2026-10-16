@@ -42,6 +42,9 @@ compile_error!(
      implementation; see src/platform/mod.rs."
 );
 
+/// Signature of the menu-bar item's command handler.
+pub type TrayCallback = extern "C" fn(command_id: i32);
+
 /// What a window surface can draw, chosen per wallpaper rather than per platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SurfaceKind {
@@ -197,4 +200,115 @@ pub trait Platform: Sized {
 
     /// Register the handler the settings UI calls back with.
     fn register_ui_handler() {}
+
+    // -----------------------------------------------------------------------
+    // Tray / status item
+    //
+    // The defaults are no-ops so a platform without one -- the Linux CLI-only
+    // build, until its GUI lands -- does not have to implement methods it
+    // cannot honour. `install_tray_menu` returns false rather than failing
+    // silently, so the caller can report that there is no menu.
+    //
+    // These exist because the daemon called straight into AppKit for its
+    // menu-bar item, which left the Linux build with undefined references to
+    // `lively_setup_tray_menu` at link time. Routing through the trait keeps
+    // the daemon platform-agnostic.
+    // -----------------------------------------------------------------------
+
+    fn install_tray_menu(_callback: TrayCallback) -> bool {
+        false
+    }
+
+    fn set_tray_title(_title: &str) {}
+
+    /// Runs `f` on the thread that owns the event loop.
+    ///
+    /// The default executes inline. That is correct for a backend whose loop
+    /// *is* the main thread and whose callbacks touch nothing platform
+    /// specific, which is the case for the Linux X11/Wayland build today.
+    fn dispatch_on_main(f: extern "C" fn(*mut std::ffi::c_void), ctx: *mut std::ffi::c_void) {
+        f(ctx);
+    }
+
+    // -----------------------------------------------------------------------
+    // Power / focus state
+    //
+    // Used by the automation watcher to pause wallpapers during fullscreen and
+    // on battery. Both default to "no", which is the safe answer: claiming a
+    // condition the platform cannot actually detect would pause wallpapers for
+    // reasons the user cannot see.
+    //
+    // These live on the trait because the watcher used to call the macOS shim
+    // directly, putting `lively_is_any_app_fullscreen` into shared code and
+    // breaking the Linux link.
+    // -----------------------------------------------------------------------
+
+    fn any_app_fullscreen() -> bool {
+        false
+    }
+
+    fn on_battery_power() -> bool {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch helpers
+//
+// The daemon used to call the Objective-C shim directly for screens, the tray
+// and the run loop. That put AppKit-only symbols into code shared with the
+// Linux backend, so `cargo build --target x86_64-unknown-linux-gnu` failed at
+// link time with `undefined reference to lively_pump_events` and a dozen
+// others -- the Linux target had never been link-tested.
+//
+// Everything platform-specific now arrives through here.
+// ---------------------------------------------------------------------------
+
+/// Prepares the platform for use.
+///
+/// macOS must construct `NSApplication` before any window or screen query;
+/// the X11/Wayland backend talks straight to the display server and needs
+/// nothing, so this is just `Platform::init`.
+pub fn ensure_app_initialised() -> bool {
+    ActivePlatform::init().is_ok()
+}
+
+pub fn pump_events(timeout_secs: f64) {
+    ActivePlatform::pump_events(timeout_secs);
+}
+
+pub fn screen_count() -> u32 {
+    ActivePlatform::screen_count()
+}
+
+pub fn screen_info(index: u32) -> (String, u32, u32) {
+    ActivePlatform::screen_info(index)
+}
+
+pub fn present_ui() -> Result<()> {
+    ActivePlatform::present_ui()
+}
+
+pub fn register_ui_handler() {
+    ActivePlatform::register_ui_handler();
+}
+
+pub fn install_tray_menu(callback: TrayCallback) -> bool {
+    ActivePlatform::install_tray_menu(callback)
+}
+
+pub fn set_tray_title(title: &str) {
+    ActivePlatform::set_tray_title(title);
+}
+
+pub fn dispatch_on_main(f: extern "C" fn(*mut std::ffi::c_void), ctx: *mut std::ffi::c_void) {
+    ActivePlatform::dispatch_on_main(f, ctx);
+}
+
+pub fn any_app_fullscreen() -> bool {
+    ActivePlatform::any_app_fullscreen()
+}
+
+pub fn on_battery_power() -> bool {
+    ActivePlatform::on_battery_power()
 }
