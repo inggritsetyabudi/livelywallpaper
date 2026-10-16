@@ -150,16 +150,7 @@ struct ContentView: View {
                 }
             }
         )
-        .overlay(alignment: .leading) {
-            // Outside the row's content, not on top of the icon. The row
-            // reserves the inset itself so the glyphs stay aligned.
-            if active {
-                Capsule()
-                    .fill(GoldenGate.tint)
-                    .frame(width: 3, height: 16)
-                    .padding(.leading, 3)
-            }
-        }
+
         .foregroundStyle(active ? GoldenGate.tint : .primary)
         .accessibilityAddTraits(active ? [.isSelected] : [])
     }
